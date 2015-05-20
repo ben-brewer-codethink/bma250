@@ -373,9 +373,9 @@ static int bma250_set_mode(struct i2c_client *client, unsigned char Mode)
 				break;
 			case BMA250_MODE_SUSPEND:
 				data1  = BMA250_SET_BITSLICE(data1,
-					BMA250_EN_LOW_POWER, 0);
+					BMA250_EN_LOW_POWER, 1);
 				data1  = BMA250_SET_BITSLICE(data1,
-					BMA250_EN_SUSPEND, 1);
+					BMA250_EN_SUSPEND, 0);
 				break;
 			default:
 				break;
