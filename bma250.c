@@ -360,18 +360,21 @@ static int bma250_set_mode(struct i2c_client *client, unsigned char Mode)
 					BMA250_EN_LOW_POWER__REG, &data1);
 			switch (Mode) {
 			case BMA250_MODE_NORMAL:
+				printk(KERN_INFO "Entering normal mode\n");
 				data1  = BMA250_SET_BITSLICE(data1,
 					BMA250_EN_LOW_POWER, 0);
 				data1  = BMA250_SET_BITSLICE(data1,
 					BMA250_EN_SUSPEND, 0);
 				break;
 			case BMA250_MODE_LOWPOWER:
+				printk(KERN_INFO "Entering low power mode\n");
 				data1  = BMA250_SET_BITSLICE(data1,
 					BMA250_EN_LOW_POWER, 1);
 				data1  = BMA250_SET_BITSLICE(data1,
 					BMA250_EN_SUSPEND, 0);
 				break;
 			case BMA250_MODE_SUSPEND:
+				printk(KERN_INFO "Entering suspend mode\n");
 				data1  = BMA250_SET_BITSLICE(data1,
 					BMA250_EN_LOW_POWER, 1);
 				data1  = BMA250_SET_BITSLICE(data1,
@@ -998,6 +1001,8 @@ static void bma250_early_suspend(struct early_suspend *h)
 		}
 		mutex_unlock(&data->enable_mutex);
 	}
+
+	printk(KERN_INFO "Entering early suspend mode\n");
 }
 
 static void bma250_late_resume(struct early_suspend *h)
