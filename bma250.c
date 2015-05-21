@@ -66,6 +66,11 @@ module_param_named(debug_mask, debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP);
 #define BMA250_RANGE_SET                        0
 #define BMA250_BW_SET                           4
 
+/* when the system goes into suspend it can be revived
+   by picking it up or tapping the screen. After this
+   number of minutes the system will go into full suspend,
+   and the accelerometer is no longer active */
+#define PICKUP_TIMEOUT_MINS                     30
 
 /*
  *
@@ -232,6 +237,7 @@ struct bma250_data {
 	struct mutex enable_mutex;
 	struct mutex mode_mutex;
 	struct delayed_work work;
+	struct delayed_work pickup_timeout;
 	struct work_struct irq_work;
 #ifdef CONFIG_HAS_EARLYSUSPEND
 	struct early_suspend early_suspend;
@@ -901,6 +907,37 @@ static void bma250_input_delete(struct bma250_data *bma250)
 	input_free_device(dev);
 }
 
+static void bma250_pickup_timeout_func(struct work_struct *work)
+{
+	struct bma250_data *bma250 =
+		container_of((struct delayed_work *)work,
+			struct bma250_data, work);
+	struct i2c_client *client = bma250->bma250_client;
+	unsigned char data1 = '\0';
+
+	printk(KERN_INFO "Pickup timeout function called\n");
+
+	if (client != NULL) {
+		/* go into full suspend */
+		bma250_smbus_read_byte(client,
+			BMA250_EN_LOW_POWER__REG, &data1);
+
+		data1  = BMA250_SET_BITSLICE(data1,
+			BMA250_EN_LOW_POWER, 0);
+		data1  = BMA250_SET_BITSLICE(data1,
+			BMA250_EN_SUSPEND, 1);
+
+		bma250_smbus_write_byte(client,
+			BMA250_EN_LOW_POWER__REG, &data1);
+
+		/* indicate that no timeout is in progress */
+		printk(KERN_INFO "Pickup timeout complete\n");
+	}
+	else {
+		printk(KERN_INFO "Pickup timeout: no client\n");
+	}
+}
+
 static int bma250_probe(struct i2c_client *client,
 		const struct i2c_device_id *id)
 {
@@ -930,6 +967,9 @@ static int bma250_probe(struct i2c_client *client,
 
 	INIT_DELAYED_WORK(&data->work, bma250_work_func);
 	dprintk(DEBUG_INIT, "bma: INIT_DELAYED_WORK\n");
+	INIT_DELAYED_WORK(&data->pickup_timeout,
+		bma250_pickup_timeout_func);
+	dprintk(DEBUG_INIT, "bma: INIT_DELAYED_WORK (pickup timeout)\n");
 	atomic_set(&data->delay, BMA250_MAX_DELAY);
 	atomic_set(&data->enable, 0);
 	
@@ -1002,7 +1042,12 @@ static void bma250_early_suspend(struct early_suspend *h)
 		mutex_unlock(&data->enable_mutex);
 	}
 
+	/* After a time put the system into full suspend */
 	printk(KERN_INFO "Entering early suspend mode\n");
+	schedule_delayed_work(&data->pickup_timeout,
+		msecs_to_jiffies(PICKUP_TIMEOUT_MINS*60000));
+	printk(KERN_INFO "Pickup timeout started with " \
+		"timeout in %d mins\n",PICKUP_TIMEOUT_MINS);
 }
 
 static void bma250_late_resume(struct early_suspend *h)
