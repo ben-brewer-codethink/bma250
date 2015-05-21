@@ -31,6 +31,9 @@
 #include <mach/sys_config.h>
 #include <linux/init-input.h>
 
+#include <linux/kobject.h>
+#include <linux/sysfs.h>
+
 #ifdef CONFIG_HAS_EARLYSUSPEND
 #include <linux/earlysuspend.h>
 #endif
@@ -65,12 +68,6 @@ module_param_named(debug_mask, debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP);
 #define BMA250E_CHIP_ID                         0xF9
 #define BMA250_RANGE_SET                        0
 #define BMA250_BW_SET                           4
-
-/* when the system goes into suspend it can be revived
-   by picking it up or tapping the screen. After this
-   number of minutes the system will go into full suspend,
-   and the accelerometer is no longer active */
-#define PICKUP_TIMEOUT_MINS                     30
 
 /*
  *
@@ -265,6 +262,42 @@ static void bma250_early_suspend(struct early_suspend *h);
 static void bma250_late_resume(struct early_suspend *h);
 #endif
 
+static int pickup_timeout_mins;
+
+static ssize_t pickup_timeout_mins_show(struct kobject *kobj,
+					 struct kobj_attribute *attr,
+					 char *buf)
+{
+	if (strcmp(attr->attr.name, "pickup_timeout_mins") == 0)
+		return sprintf(buf, "%d\n", pickup_timeout_mins);
+	return -1;
+}
+
+static ssize_t pickup_timeout_mins_store(struct kobject *kobj, struct kobj_attribute *attr,
+					const char *buf, size_t count)
+{
+	int var;
+
+	sscanf(buf, "%du", &var);
+	if (strcmp(attr->attr.name, "pickup_timeout_mins") == 0)
+		pickup_timeout_mins = var;
+	return count;
+}
+
+static struct kobj_attribute bma250_interface_attribute =
+	__ATTR(pickup_timeout_mins, 0666,
+		pickup_timeout_mins_show, pickup_timeout_mins_store);
+
+static struct attribute *bma250_interface_attrs[] = {
+	&bma250_interface_attribute.attr,
+	NULL
+};
+
+static struct attribute_group bma250_interface_attr_group = {
+	.attrs = bma250_interface_attrs
+};
+
+static struct kobject *bma250_interface;
 
 /**
  * gsensor_detect - Device detection callback for automatic device creation
@@ -1045,9 +1078,9 @@ static void bma250_early_suspend(struct early_suspend *h)
 	/* After a time put the system into full suspend */
 	printk(KERN_INFO "Entering early suspend mode\n");
 	schedule_delayed_work(&data->pickup_timeout,
-		msecs_to_jiffies(PICKUP_TIMEOUT_MINS*60000));
+		msecs_to_jiffies(pickup_timeout_mins*60000));
 	printk(KERN_INFO "Pickup timeout started with " \
-		"timeout in %d mins\n",PICKUP_TIMEOUT_MINS);
+		"timeout in %d mins\n",pickup_timeout_mins);
 }
 
 static void bma250_late_resume(struct early_suspend *h)
@@ -1207,6 +1240,29 @@ static struct i2c_driver bma250_driver = {
 	.address_list	= normal_i2c,
 };
 
+/* create an interface by which userland can twiddle
+   with the pickup timeout */
+static int interface_init(void)
+{
+	int retval;
+
+	pickup_timeout_mins = 30;
+
+	/* create an object under /sys/kernel */
+	bma250_interface  = kobject_create_and_add("bma250", kernel_kobj);
+	if (!bma250_interface) {
+		printk(KERN_INFO "bma250: failed to create /sys/kernel/bma250");
+		return -ENOMEM;
+	}
+
+	/* create files under /sys/kernel/bma250 */
+	retval = sysfs_create_group(bma250_interface, &bma250_interface_attr_group);
+	if (retval)
+		kobject_put(bma250_interface);
+	printk(KERN_INFO "bma250: userland interface initialised %d", retval);
+	return retval;
+}
+
 static int __init BMA250_init(void)
 {
 	int ret = -1;
@@ -1227,12 +1283,16 @@ static int __init BMA250_init(void)
 	
 	ret = i2c_add_driver(&bma250_driver);
 
+	if (ret == 0)
+		ret = interface_init();
+
 	return ret;
 }
 
 static void __exit BMA250_exit(void)
 {
 	i2c_del_driver(&bma250_driver);
+	kobject_put(bma250_interface);
 }
 
 MODULE_AUTHOR("Albert Zhang <xu.zhang@bosch-sensortec.com>");
