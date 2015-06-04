@@ -404,6 +404,9 @@ static int bma250_set_mode(struct i2c_client *client, unsigned char Mode)
 					BMA250_EN_LOW_POWER, 0);
 				data1  = BMA250_SET_BITSLICE(data1,
 					BMA250_EN_SUSPEND, 0);
+                                struct bma250_data *bma250 = i2c_get_clientdata(client);
+                                cancel_delayed_work_sync(&bma250->pickup_timeout);
+                                printk(KERN_INFO "Pickup timeout cancelled\n");
 				break;
 			case BMA250_MODE_LOWPOWER:
 				printk(KERN_INFO "Entering low power mode\n");
