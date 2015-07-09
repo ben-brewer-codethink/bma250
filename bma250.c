@@ -60,9 +60,16 @@ module_param_named(debug_mask, debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP);
 #define SLOPE_Y_INDEX                           6
 #define SLOPE_Z_INDEX                           7
 #define BMA250_MAX_DELAY                        200
-#define BMA150_CHIP_ID                          2
-#define BMA250_CHIP_ID                          3
-#define BMA250E_CHIP_ID                         0xF9
+
+enum bma_chip_id
+{
+	BMA_CHIP_ID_150  = 0x02,
+	BMA_CHIP_ID_250  = 0x03,
+	BMA_CHIP_ID_250E = 0xF9,
+	BMA_CHIP_ID_255  = 0xFA,
+	BMA_CHIP_ID_280  = 0xFB,
+};
+
 #define BMA250_RANGE_SET                        0
 #define BMA250_BW_SET                           4
 
@@ -239,6 +246,8 @@ struct bma250acc {
 struct bma250_data {
 	struct i2c_client *bma250_client;
 
+	enum bma_chip_id chip_id;
+
 	enum bma250_mode mode;
 	unsigned char    mode_ctrl;
 	unsigned char    low_noise_ctrl;
@@ -263,11 +272,12 @@ struct bma250_data {
 
 /* Addresses to scan */
 static const unsigned short normal_i2c[] = { 0x18, 0x19, 0x38, 0x08, I2C_CLIENT_END };
-static const int chip_id_value[4] = { 0x02, 0x03, 0xf9, 0xfa };
 struct input_dev *this_dev = NULL;
 extern int flag_suspend;
 static int old_value = 0;
 
+static const int chip_id_value[] = { BMA_CHIP_ID_150, BMA_CHIP_ID_250, BMA_CHIP_ID_250E, BMA_CHIP_ID_255, BMA_CHIP_ID_280, 0 };
+static const char* chip_id_name[] = { "bma150", "bma250", "bma250e", "bma255", "bma280", NULL };
 
 static struct sensor_config_info config_info = {
 	.input_type = GSENSOR_TYPE,
@@ -297,21 +307,25 @@ static int gsensor_detect(struct i2c_client *client, struct i2c_board_info *info
 		while (retry--) {
 			ret = i2c_smbus_read_byte_data(client, BMA250_CHIP_ID_REG);
 
-			dprintk(DEBUG_INIT, "%s:addr = 0x%x,  Read ID value is :%d\n",
-				__func__, client->addr,  ret);
-
-			while ((chip_id_value[i++]) && (i < 5)) {
-				dprintk(DEBUG_INIT, "chip:%d\n", chip_id_value[i - 1]);
-				if ((ret & 0x00FF) == chip_id_value[i - 1]){
-					strlcpy(info->type, SENSOR_NAME, I2C_NAME_SIZE);
-					return 0;
+			if (ret >= 0)
+			{
+				for (i = 0; chip_id_value[i]; i++) {
+					if ((ret & 0xFF) == chip_id_value[i]) {
+						printk(KERN_INFO "BMA chip identified as %s (0x%02X).\n",
+							chip_id_name[i], chip_id_value[i]);
+						strlcpy(info->type, SENSOR_NAME, I2C_NAME_SIZE);
+						return 0;
+					}
 				}
+
+				printk(KERN_WARNING "Unsupported Bosch Sensortec device id (%d).\n", ret);
+				break;
 			}
+
 			msleep(1);
 		}
 
-		dprintk(DEBUG_INIT, "%s:Bosch Sensortec Device not found,\
-			 maybe the other gsensor equipment! \n",__func__);
+		printk(KERN_WARNING "Bosch Sensortec device not found.\n");
 	}
 
 	return -ENODEV;
@@ -350,6 +364,23 @@ static void key_press_powerkey_power(void)
 }
 
 
+static int bma250_get_chip_id(struct bma250_data *bma250, enum bma_chip_id *chip_id)
+{
+	unsigned char id;
+
+	if (!bma250)
+		return -1;
+
+	if (bma250_smbus_read_byte(bma250->bma250_client,
+		BMA250_CHIP_ID_REG, &id) < 0)
+		return -1;
+	bma250->chip_id = id;
+
+	if (chip_id)
+		*chip_id = bma250->chip_id;
+	return 0;
+}
+
 static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 {
 	int mode_dirty = 0;
@@ -358,6 +389,21 @@ static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 
 	if (!bma250 || (mode >= BMA250_MODE_COUNT))
 		return -1;
+
+	if (bma250->mode == mode)
+		return 0;
+
+	if (bma250->chip_id <= BMA_CHIP_ID_250) {
+		switch (mode) {
+		case BMA250E_MODE_LOWPOWER2:
+		case BMA250E_MODE_STANDBY:
+		case BMA250E_MODE_DEEP_SUSPEND:
+			printk(KERN_WARNING "Attempting to switch to unsupported mode.\n");
+			return -1;
+		default:
+			break;
+		}
+	}
 
 	mode_ctrl      = bma250->mode_ctrl;
 	low_noise_ctrl = bma250->low_noise_ctrl;
@@ -673,6 +719,27 @@ static void bma250_work_func(struct work_struct *work)
 	schedule_delayed_work(&bma250->work, delay);
 }
 
+static ssize_t bma250_chip_id_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	int i;
+	const char* chip_name = "unknown";
+
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	for (i = 0; chip_id_value[i]; i++)
+	{
+		if (chip_id_value[i] == bma250->chip_id) {
+			chip_name = chip_id_name[i];
+			break;
+		}
+	}
+
+	dprintk(DEBUG_CONTROL_INFO, "%s (0x%02X), %s\n", chip_name, bma250->chip_id, __FUNCTION__);
+	return sprintf(buf, "%s (0x%02X)\n", chip_name, bma250->chip_id);
+}
+
 static ssize_t bma250_range_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
@@ -877,6 +944,8 @@ static ssize_t bma250_enable_store(struct device *dev,
 	return count;
 }
 
+static DEVICE_ATTR(chip_id, S_IRUGO,
+		bma250_chip_id_show, NULL);
 static DEVICE_ATTR(range, S_IRUGO|S_IWUSR|S_IWGRP,
 		bma250_range_show, bma250_range_store);
 static DEVICE_ATTR(bandwidth, S_IRUGO|S_IWUSR|S_IWGRP,
@@ -891,6 +960,7 @@ static DEVICE_ATTR(enable, S_IRUGO|S_IWUSR|S_IWGRP,
 		bma250_enable_show, bma250_enable_store);
 
 static struct attribute *bma250_attributes[] = {
+	&dev_attr_chip_id.attr,
 	&dev_attr_range.attr,
 	&dev_attr_bandwidth.attr,
 	&dev_attr_mode.attr,
@@ -962,6 +1032,8 @@ static int bma250_probe(struct i2c_client *client,
 
 	i2c_set_clientdata(client, data);
 	data->bma250_client = client;
+
+	bma250_get_chip_id(data, NULL);
 
 	bma250_get_mode(data, NULL);
 	bma250_set_mode(data, BMA250_MODE_NORMAL);
