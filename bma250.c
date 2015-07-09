@@ -329,17 +329,6 @@ static void key_press_powerkey_power(void)
 }
 
 
-static int bma250_smbus_read_byte_block(struct i2c_client *client,
-		unsigned char reg_addr, unsigned char *data, unsigned char len)
-{
-	s32 dummy;
-	dummy = i2c_smbus_read_i2c_block_data(client, reg_addr, len, data);
-
-	if (dummy < 0)
-		return -1;
-	return 0;
-}
-
 static int bma250_set_mode(struct i2c_client *client, unsigned char Mode)
 {
 	int comres = 0;
@@ -545,8 +534,7 @@ static int bma250_read_accel_xyz(struct i2c_client *client,
 	if (client == NULL) {
 		comres = -1;
 	} else {
-		comres = bma250_smbus_read_byte_block(client,
-				BMA250_ACC_X_LSB__REG, data, 6);
+		comres = i2c_smbus_read_i2c_block_data(client, BMA250_ACC_X_LSB__REG, 6, data);
 
 		acc->x = BMA250_GET_BITSLICE(data[0], BMA250_ACC_X_LSB)
 			|(BMA250_GET_BITSLICE(data[1],
