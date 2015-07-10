@@ -237,6 +237,16 @@ enum bma250_mode {
 	BMA250_MODE_COUNT
 };
 
+const char* bma250_mode_name[] = {
+	"normal",
+	"lowpower1",
+	"suspend",
+	"lowpower2",
+	"standby",
+	"deep-suspend",
+	NULL
+};
+
 
 
 struct bma250acc {
@@ -809,32 +819,38 @@ static ssize_t bma250_bandwidth_store(struct device *dev,
 static ssize_t bma250_mode_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	unsigned char data;
 	struct i2c_client *client = to_i2c_client(dev);
 	struct bma250_data *bma250 = i2c_get_clientdata(client);
 
-	data = bma250->mode;
+	const char* mode_name = "unknown";
 
-	dprintk(DEBUG_CONTROL_INFO, "%d, %s\n", data, __FUNCTION__);
-	return sprintf(buf, "%d\n", data);
+	if (bma250->mode < BMA250_MODE_COUNT)
+		mode_name = bma250_mode_name[bma250->mode];
+
+	dprintk(DEBUG_CONTROL_INFO, "%s, %s\n", mode_name, __FUNCTION__);
+	return sprintf(buf, "%s\n", mode_name);
 }
 
 static ssize_t bma250_mode_store(struct device *dev,
 		struct device_attribute *attr,
 		const char *buf, size_t count)
 {
-	unsigned long data;
-	int error;
+	int i;
 	struct i2c_client *client = to_i2c_client(dev);
 	struct bma250_data *bma250 = i2c_get_clientdata(client);
 
-	error = strict_strtoul(buf, 10, &data);
-	if (error)
-		return error;
-	if (bma250_set_mode(bma250, (unsigned char) data) < 0)
-		return -EINVAL;
+	for (i = 0; bma250_mode_name[i]; i++) {
+		if (strcmp(bma250_mode_name[i], buf) == 0) {
+			if (bma250_set_mode(bma250, i) < 0) {
+				printk(KERN_WARNING "Failed to set mode '%.*s'.\n", count, buf);
+			} else {
+				return count;
+			}
+		}
+	}
 
-	return count;
+	printk(KERN_WARNING "Invalid mode '%.*s'.\n", count, buf);
+	return -EINVAL;
 }
 
 
