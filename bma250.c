@@ -60,6 +60,7 @@ module_param_named(debug_mask, debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP);
 #define SLOPE_Y_INDEX                           6
 #define SLOPE_Z_INDEX                           7
 #define BMA250_MAX_DELAY                        200
+#define LOW_POWER_MODE                          BMA250_MODE_LOWPOWER1
 
 enum bma_chip_id
 {
@@ -1079,14 +1080,12 @@ static int bma250_probe(struct i2c_client *client,
 		goto error_sysfs;
 	}
 
-/*
 #ifdef CONFIG_HAS_EARLYSUSPEND
 	data->early_suspend.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 1;
 	data->early_suspend.suspend = bma250_early_suspend;
 	data->early_suspend.resume = bma250_late_resume;
 	register_early_suspend(&data->early_suspend);
 #endif
-*/
 
 	dprintk(DEBUG_INIT, "bma250: probe end\n");
 	return 0;
@@ -1111,14 +1110,12 @@ static void bma250_early_suspend(struct early_suspend *h)
 	if (NORMAL_STANDBY == standby_type) {
 		printk("bma250_late_resume\n");
 
-/*
 		mutex_lock(&data->enable_mutex);
 		if (atomic_read(&data->enable) == 1) {
-			bma250_set_mode(data, BMA250_MODE_SUSPEND);
+			bma250_set_mode(data, LOW_POWER_MODE);
 			cancel_delayed_work_sync(&data->work);
 		}
 		mutex_unlock(&data->enable_mutex);
-*/
 	} else if (SUPER_STANDBY == standby_type) {
 		printk("bma250_late_resume\n");
 		if (bma250_get_bandwidth(data->bma250_client, &data->bandwidth_state) < 0)
@@ -1129,7 +1126,7 @@ static void bma250_early_suspend(struct early_suspend *h)
 
 		mutex_lock(&data->enable_mutex);
 		if (atomic_read(&data->enable) == 1) {
-			bma250_set_mode(data, BMA250_MODE_SUSPEND);
+			bma250_set_mode(data, LOW_POWER_MODE);
 			cancel_delayed_work_sync(&data->work);
 		}
 		mutex_unlock(&data->enable_mutex);
@@ -1146,7 +1143,6 @@ static void bma250_late_resume(struct early_suspend *h)
 	if (NORMAL_STANDBY == standby_type) {
 		printk("bma250_late_resume\n");
 
-/*
 		mutex_lock(&data->enable_mutex);
 		if (atomic_read(&data->enable) == 1) {
 			bma250_set_mode(data, BMA250_MODE_NORMAL);
@@ -1154,7 +1150,6 @@ static void bma250_late_resume(struct early_suspend *h)
 				msecs_to_jiffies(atomic_read(&data->delay)));
 		}
 		mutex_unlock(&data->enable_mutex);
-*/
 	} else if (SUPER_STANDBY == standby_type) {
 		printk("bma250_late_resume\n");
 		if (bma250_set_bandwidth(data->bma250_client,
@@ -1220,7 +1215,7 @@ static int bma250_suspend(struct i2c_client *client, pm_message_t mesg)
 		mutex_lock(&data->enable_mutex);
 
 		if (atomic_read(&data->enable) == 1) {
-			bma250_set_mode(data, BMA250_MODE_SUSPEND);
+			bma250_set_mode(data, LOW_POWER_MODE);
 			cancel_delayed_work_sync(&data->work);
 		}
 
@@ -1234,7 +1229,7 @@ static int bma250_suspend(struct i2c_client *client, pm_message_t mesg)
 
 		mutex_lock(&data->enable_mutex);
 		if (atomic_read(&data->enable) == 1) {
-			bma250_set_mode(data, BMA250_MODE_SUSPEND);
+			bma250_set_mode(data, LOW_POWER_MODE);
 			cancel_delayed_work_sync(&data->work);
 		}
 		mutex_unlock(&data->enable_mutex);
@@ -1276,7 +1271,6 @@ static struct i2c_driver bma250_driver = {
 	.id_table	= bma250_id,
 	.probe		= bma250_probe,
 	.remove		= bma250_remove,
-/*
 #ifdef CONFIG_HAS_EARLYSUSPEND
 #else
 #ifdef CONFIG_PM
@@ -1284,7 +1278,6 @@ static struct i2c_driver bma250_driver = {
 	.resume  = bma250_resume,
 #endif
 #endif
-*/
 	.address_list	= normal_i2c,
 };
 
