@@ -60,6 +60,7 @@ module_param_named(debug_mask, debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP);
 #define SLOPE_Y_INDEX                           6
 #define SLOPE_Z_INDEX                           7
 #define LOW_POWER_MODE                          BMA250_MODE_LOWPOWER1
+#define DISABLE_MODE                            BMA250E_MODE_DEEP_SUSPEND
 
 #define BMA250_MODE_SET                         BMA250_MODE_NORMAL
 #define BMA250_SLEEP_DUR_SET                    100000
@@ -1086,7 +1087,6 @@ static ssize_t bma250_enable_show(struct device *dev,
 	struct i2c_client *client = to_i2c_client(dev);
 	struct bma250_data *bma250 = i2c_get_clientdata(client);
 
-	dprintk(DEBUG_CONTROL_INFO, "%d, %s\n", atomic_read(&bma250->enable), __FUNCTION__);
 	return sprintf(buf, "%d\n", atomic_read(&bma250->enable));
 
 }
@@ -1097,23 +1097,22 @@ static void bma250_set_enable(struct device *dev, int enable)
 	struct bma250_data *bma250 = i2c_get_clientdata(client);
 	int pre_enable = atomic_read(&bma250->enable);
 
-    printk("bma250_set_enable\n");
+	if ((enable != !!enable)
+		|| (enable == pre_enable))
+		return;
+
 	mutex_lock(&bma250->enable_mutex);
 
-	if (enable && !pre_enable) {
+	if (enable) {
 		bma250_set_mode(bma250, BMA250_MODE_NORMAL);
 		schedule_delayed_work(&bma250->work,
 			usecs_to_jiffies(atomic_read(&bma250->sleep_dur)));
-		atomic_set(&bma250->enable, 1);
-	} else if (!enable && pre_enable) {
-		printk("bma250_set_enable pre_enable\n");
-/*
-		bma250_set_mode(bma250, BMA250_MODE_SUSPEND);
+	} else {
+		bma250_set_mode(bma250, DISABLE_MODE);
 		cancel_delayed_work_sync(&bma250->work);
-*/
-		atomic_set(&bma250->enable, 0);
 	}
 
+	atomic_set(&bma250->enable, enable);
 	mutex_unlock(&bma250->enable_mutex);
 }
 
@@ -1121,18 +1120,17 @@ static ssize_t bma250_enable_store(struct device *dev,
 		struct device_attribute *attr,
 		const char *buf, size_t count)
 {
-	unsigned long data;
+	unsigned long enable;
 	int error;
 
-	error = strict_strtoul(buf, 10, &data);
-
+	error = strict_strtoul(buf, 10, &enable);
 	if (error)
 		return error;
 
-	if ((data == 0) || (data == 1)) {
-		bma250_set_enable(dev, data);
-	}
+	if (enable != !!enable)
+		return -EINVAL;
 
+	bma250_set_enable(dev, enable);
 	return count;
 }
 
@@ -1244,7 +1242,7 @@ static int bma250_probe(struct i2c_client *client,
 
 	INIT_DELAYED_WORK(&data->work, bma250_work_func);
 	dprintk(DEBUG_INIT, "bma: INIT_DELAYED_WORK\n");
-	atomic_set(&data->enable, 0);
+	atomic_set(&data->enable, 1);
 
 	err = bma250_input_init(data);
 	if (err < 0){
