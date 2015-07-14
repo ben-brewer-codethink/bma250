@@ -228,7 +228,6 @@ struct bma250_data {
 	struct bma250acc value;
 	struct mutex value_mutex;
 	struct mutex enable_mutex;
-	struct mutex mode_mutex;
 	struct delayed_work work;
 	struct work_struct irq_work;
 #ifdef CONFIG_HAS_EARLYSUSPEND
@@ -885,7 +884,6 @@ static int bma250_probe(struct i2c_client *client,
 	data->bma250_client = client;
 
 	mutex_init(&data->value_mutex);
-	mutex_init(&data->mode_mutex);
 	mutex_init(&data->enable_mutex);
 
 	bma250_set_bandwidth(client, BMA250_BW_SET);
