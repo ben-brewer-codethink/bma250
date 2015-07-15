@@ -206,12 +206,18 @@ enum bma_chip_id
 #define BMA250_EN_SUSPEND__MSK                  0x80
 #define BMA250_EN_SUSPEND__REG                  BMA250_MODE_CTRL_REG
 
+
 #define BMA250_GET_BITSLICE(regvar, bitname)\
 			((regvar & bitname##__MSK) >> bitname##__POS)
 
-
 #define BMA250_SET_BITSLICE(regvar, bitname, val)\
 	((regvar & ~bitname##__MSK) | ((val<<bitname##__POS)&bitname##__MSK))
+
+#define BMA250_GET_STATE_BITSLICE(state, bitname)\
+			BMA250_GET_BITSLICE(state[bitname##__REG], bitname)
+
+#define BMA250_SET_STATE_BITSLICE(state, bitname, val)\
+			BMA250_SET_BITSLICE(state[bitname##__REG], bitname, val)
 
 
 /* range and bandwidth */
@@ -300,14 +306,9 @@ struct bma250_acc {
 struct bma250_data {
 	struct i2c_client *bma250_client;
 
-	enum bma_chip_id chip_id;
-
 	enum bma250_mode mode;
 
-	unsigned char mode_ctrl;
-	unsigned char low_noise_ctrl;
-	unsigned char range_sel;
-	unsigned char bw_sel;
+	unsigned char state[64];
 
 	atomic_t delay;
 	atomic_t enable;
@@ -417,21 +418,88 @@ static void key_press_powerkey_power(void)
 }
 
 
-static int bma250_get_chip_id(struct bma250_data *bma250, enum bma_chip_id *chip_id)
+static int bma250_reg_is_state_r[64] = {
+	1, 1, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 1,
+	1, 1, 1, 1, 0, 0, 1, 1,
+	1, 1, 1, 1, 0, 0, 1, 0,
+	1, 1, 1, 1, 1, 1, 1, 1,
+	1, 1, 1, 1, 1, 1, 1, 1,
+	1, 0, 1, 1, 1, 0, 1, 1,
+	1, 1, 1, 1, 1, 0, 1, 0,
+};
+
+static int bma250_reg_is_state_w[64] = {
+	0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 1,
+	1, 1, 1, 1, 0, 0, 1, 1,
+	1, 1, 1, 1, 0, 0, 1, 0,
+	1, 1, 1, 1, 1, 1, 1, 1,
+	1, 1, 1, 1, 1, 1, 1, 1,
+	1, 0, 1, 1, 1, 0, 1, 1,
+	1, 1, 1, 1, 1, 0, 1, 0,
+};
+
+static int bma250_read_state(struct bma250_data *bma250)
 {
-	unsigned char id;
+	unsigned char state[64];
+	int i;
 
-	if (!bma250)
+	if (!bma250 || !bma250->bma250_client)
 		return -1;
 
-	if (bma250_smbus_read_byte(bma250->bma250_client,
-		BMA250_CHIP_ID_REG, &id) < 0)
-		return -1;
-	bma250->chip_id = id;
+	for (i = 0; i < 64; i++) {
+		if (!bma250_reg_is_state_r[i])
+			state[i] = 0x00;
+		else if (bma250_smbus_read_byte(
+			bma250->bma250_client, i, &state[i]) < 0)
+			return -1;
+	}
 
-	if (chip_id)
-		*chip_id = bma250->chip_id;
+	memcpy(bma250->state, state, 64);
+
+	if (BMA250_GET_STATE_BITSLICE(state, BMA250E_DEEP_SUSPEND)) {
+		bma250->mode = BMA250E_MODE_DEEP_SUSPEND;
+	} else if(BMA250_GET_STATE_BITSLICE(state, BMA250_EN_SUSPEND)) {
+		if (BMA250_GET_STATE_BITSLICE(state, BMA250E_LOW_POWER_MODE))
+			bma250->mode = BMA250E_MODE_STANDBY;
+		else
+			bma250->mode = BMA250_MODE_SUSPEND;
+	} else if(BMA250_GET_STATE_BITSLICE(state, BMA250_EN_LOW_POWER)) {
+		if (BMA250_GET_STATE_BITSLICE(state, BMA250E_LOW_POWER_MODE))
+			bma250->mode = BMA250_MODE_LOWPOWER1;
+		else
+			bma250->mode = BMA250E_MODE_LOWPOWER2;
+	} else {
+		bma250->mode = BMA250_MODE_NORMAL;
+	}
+
 	return 0;
+}
+
+static int bma250_write_state(struct bma250_data *bma250)
+{
+	int i, error = 0;
+
+	if (!bma250 || !bma250->bma250_client)
+		return -1;
+
+	for (i = 0; i < 64; i++) {
+		if (!bma250_reg_is_state_w[i])
+			continue;
+
+		if (bma250_smbus_write_byte(
+			bma250->bma250_client, i, &bma250->state[i]) < 0)
+			error++;
+	}
+
+	return (error == 0 ? 0 : -1);
+}
+
+
+static enum bma_chip_id bma250_chip_id(struct bma250_data *bma250)
+{
+	return bma250->state[BMA250_CHIP_ID_REG];
 }
 
 static int bma250_mode_is_suspend(enum bma250_mode mode)
@@ -459,12 +527,12 @@ static int bma250_deep_suspend_unsafe(struct bma250_data *bma250, int enable)
 	if (!bma250 || (enable != !!enable))
 		return -1;
 
-	if (bma250->chip_id <= BMA_CHIP_ID_250) {
+	if (bma250_chip_id(bma250) <= BMA_CHIP_ID_250) {
 		printk(KERN_WARNING "BMA device doesn't support deep suspend.\n");
 		return -1;
 	}
 
-	mode_ctrl = bma250->mode_ctrl;
+	mode_ctrl = bma250->state[BMA250_MODE_CTRL_REG];
 
 	if (enable == BMA250_GET_BITSLICE(mode_ctrl, BMA250E_DEEP_SUSPEND))
 		return 0;
@@ -480,20 +548,13 @@ static int bma250_deep_suspend_unsafe(struct bma250_data *bma250, int enable)
 	if (enable && !bma250_is_suspended(bma250))
 		cancel_delayed_work_sync(&bma250->work);
 
-	bma250->mode_ctrl = mode_ctrl;
+	bma250->state[BMA250_MODE_CTRL_REG] = mode_ctrl;
 	bma250->mode = (enable ? BMA250E_MODE_DEEP_SUSPEND : BMA250_MODE_NORMAL);
 
 	if (!enable) {
-		bma250_smbus_write_byte(bma250->bma250_client,
-			BMA250_MODE_CTRL_REG, &mode_ctrl);
-		bma250_smbus_write_byte(bma250->bma250_client,
-			BMA250_LOW_NOISE_CTRL_REG, &bma250->low_noise_ctrl);
-		bma250_smbus_write_byte(bma250->bma250_client,
-			BMA250_RANGE_SEL_REG, &bma250->range_sel);
-		bma250_smbus_write_byte(bma250->bma250_client,
-			BMA250_BW_SEL_REG, &bma250->bw_sel);
+		bma250_write_state(bma250);
 		schedule_delayed_work(&bma250->work,
-			msecs_to_jiffies(bma250->delay));
+			msecs_to_jiffies(atomic_read(&bma250->delay)));
 	}
 
 	return 0;
@@ -526,7 +587,7 @@ static int bma250_set_mode_unsafe(struct bma250_data *bma250, enum bma250_mode m
 	if (bma250->mode == mode)
 		return 0;
 
-	if (bma250->chip_id <= BMA_CHIP_ID_250) {
+	if (bma250_chip_id(bma250) <= BMA_CHIP_ID_250) {
 		switch (mode) {
 		case BMA250E_MODE_LOWPOWER2:
 		case BMA250E_MODE_STANDBY:
@@ -548,8 +609,8 @@ static int bma250_set_mode_unsafe(struct bma250_data *bma250, enum bma250_mode m
 	was_suspended = bma250_is_suspended(bma250);
 	is_suspended  = bma250_mode_is_suspend(mode);
 
-	mode_ctrl      = bma250->mode_ctrl;
-	low_noise_ctrl = bma250->low_noise_ctrl;
+	mode_ctrl      = bma250->state[BMA250_MODE_CTRL_REG];
+	low_noise_ctrl = bma250->state[BMA250_LOW_NOISE_CTRL_REG];
 
 	switch (mode) {
 	case BMA250_MODE_LOWPOWER1:
@@ -581,9 +642,8 @@ static int bma250_set_mode_unsafe(struct bma250_data *bma250, enum bma250_mode m
 		break;
 	}
 
-	if (low_noise_ctrl != bma250->low_noise_ctrl) {
-		if (bma250->mode != BMA250_MODE_NORMAL)
-		{
+	if (low_noise_ctrl != bma250->state[BMA250_LOW_NOISE_CTRL_REG]) {
+		if (bma250->mode != BMA250_MODE_NORMAL) {
 			if (bma250_set_mode_unsafe(bma250, BMA250_MODE_NORMAL) < 0)
 				return -1;
 			mode_dirty = 1;
@@ -596,10 +656,10 @@ static int bma250_set_mode_unsafe(struct bma250_data *bma250, enum bma250_mode m
 			return -1;
 		}
 
-		bma250->low_noise_ctrl = low_noise_ctrl;
+		bma250->state[BMA250_LOW_NOISE_CTRL_REG] = low_noise_ctrl;
 	}
 
-	if (mode_ctrl != bma250->mode_ctrl) {
+	if (mode_ctrl != bma250->state[BMA250_MODE_CTRL_REG]) {
 		if (bma250_smbus_write_byte(bma250->bma250_client,
 			BMA250_MODE_CTRL_REG, &mode_ctrl) < 0) {
 			if (mode_dirty)
@@ -607,8 +667,8 @@ static int bma250_set_mode_unsafe(struct bma250_data *bma250, enum bma250_mode m
 			return -1;
 		}
 
-		bma250->mode_ctrl = mode_ctrl;
-		bma250->mode      = mode;
+		bma250->state[BMA250_MODE_CTRL_REG] = mode_ctrl;
+		bma250->mode = mode;
 	}
 
 	if (was_suspended != is_suspended) {
@@ -637,51 +697,6 @@ static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 	return ret;
 }
 
-static int bma250_get_mode(struct bma250_data *bma250, unsigned char *mode)
-{
-	unsigned char mode_ctrl;
-	unsigned char low_noise_ctrl;
-
-	if (!bma250)
-		return -1;
-
-	mutex_lock(&bma250->device_mutex);
-
-	if (!bma250_is_suspended(bma250)) {
-		if ((bma250_smbus_read_byte(bma250->bma250_client,
-			BMA250_MODE_CTRL_REG, &mode_ctrl) < 0)
-			|| (bma250_smbus_read_byte(bma250->bma250_client,
-				BMA250_LOW_NOISE_CTRL_REG, &low_noise_ctrl) < 0)) {
-			mutex_unlock(&bma250->device_mutex);
-			return -1;
-		}
-
-		bma250->mode_ctrl = mode_ctrl;
-		bma250->low_noise_ctrl = low_noise_ctrl;
-
-		if (BMA250_GET_BITSLICE(mode_ctrl, BMA250E_DEEP_SUSPEND)) {
-			bma250->mode = BMA250E_MODE_DEEP_SUSPEND;
-		} else if(BMA250_GET_BITSLICE(mode_ctrl, BMA250_EN_SUSPEND)) {
-			if (BMA250_GET_BITSLICE(low_noise_ctrl, BMA250E_LOW_POWER_MODE))
-				bma250->mode = BMA250E_MODE_STANDBY;
-			else
-				bma250->mode = BMA250_MODE_SUSPEND;
-		} else if(BMA250_GET_BITSLICE(mode_ctrl, BMA250_EN_LOW_POWER)) {
-			if (BMA250_GET_BITSLICE(low_noise_ctrl, BMA250E_LOW_POWER_MODE))
-				bma250->mode = BMA250_MODE_LOWPOWER1;
-			else
-				bma250->mode = BMA250E_MODE_LOWPOWER2;
-		} else {
-			bma250->mode = BMA250_MODE_NORMAL;
-		}
-	}
-
-	if (mode)
-		*mode = bma250->mode;
-	mutex_unlock(&bma250->device_mutex);
-	return 0;
-}
-
 static unsigned char bma250_usecs_to_sleep_duration(unsigned int usecs)
 {
 	unsigned char i;
@@ -704,17 +719,17 @@ static int bma250_set_sleep_dur(struct bma250_data *bma250, unsigned int usecs)
 
 	mutex_lock(&bma250->device_mutex);
 
-	mode_ctrl = bma250->mode_ctrl;
+	mode_ctrl = bma250->state[BMA250_MODE_CTRL_REG];
 	mode_ctrl = BMA250_SET_BITSLICE(mode_ctrl, BMA250_SLEEP_DUR, sleep_dur);
 
-	if ((mode_ctrl != bma250->mode_ctrl)
+	if ((mode_ctrl != bma250->state[BMA250_MODE_CTRL_REG])
 		&& (bma250_smbus_write_byte(bma250->bma250_client,
 			BMA250_MODE_CTRL_REG, &mode_ctrl) < 0)) {
 		mutex_unlock(&bma250->device_mutex);
 		return -1;
 	}
 
-	bma250->mode_ctrl = mode_ctrl;
+	bma250->state[BMA250_MODE_CTRL_REG] = mode_ctrl;
 	mutex_unlock(&bma250->device_mutex);
 	return 0;
 }
@@ -740,48 +755,22 @@ static int bma250_set_range(struct bma250_data *bma250, enum bma250_range range)
 
 	mutex_lock(&bma250->device_mutex);
 
-	range_sel = bma250->range_sel;
+	range_sel = bma250->state[BMA250_RANGE_SEL_REG];
 	range_sel = BMA250_SET_BITSLICE(range_sel,
 		BMA250_RANGE_SEL, range);
 
-	if (range_sel != bma250->range_sel) {
+	if (range_sel != bma250->state[BMA250_RANGE_SEL_REG]) {
 		if (bma250_smbus_write_byte(bma250->bma250_client,
 			BMA250_RANGE_SEL_REG, &range_sel) < 0) {
 			mutex_unlock(&bma250->device_mutex);
 			return -1;
 		}
-		bma250->range_sel = range_sel;
+		bma250->state[BMA250_RANGE_SEL_REG] = range_sel;
 	}
 
 	mutex_unlock(&bma250->device_mutex);
 	return 0;
 }
-
-static int bma250_get_range(struct bma250_data *bma250, enum bma250_range *range)
-{
-	unsigned char range_sel;
-
-	if (!bma250)
-		return -1;
-
-	mutex_lock(&bma250->device_mutex);
-
-	if (!bma250_is_suspended(bma250)) {
-		if (bma250_smbus_read_byte(bma250->bma250_client,
-			BMA250_RANGE_SEL_REG, &range_sel) < 0) {
-			mutex_unlock(&bma250->device_mutex);
-			return -1;
-		}
-		bma250->range_sel = range_sel;
-	}
-
-	mutex_unlock(&bma250->device_mutex);
-
-	if (range)
-		*range = BMA250_GET_BITSLICE(range_sel, BMA250_RANGE_SEL);
-	return 0;
-}
-
 
 static int bma250_set_bandwidth(struct bma250_data *bma250, enum bma250_bw bw)
 {
@@ -792,44 +781,19 @@ static int bma250_set_bandwidth(struct bma250_data *bma250, enum bma250_bw bw)
 
 	mutex_lock(&bma250->device_mutex);
 
-	bw_sel = bma250->bw_sel;
+	bw_sel = bma250->state[BMA250_BW_SEL_REG];
 	bw_sel = BMA250_SET_BITSLICE(bw_sel, BMA250_BW, bw);
 
-	if (bw_sel != bma250->bw_sel) {
+	if (bw_sel != bma250->state[BMA250_BW_SEL_REG]) {
 		if (bma250_smbus_write_byte(bma250->bma250_client,
 			BMA250_BW__REG, &bw_sel) < 0) {
 			mutex_unlock(&bma250->device_mutex);
 			return -1;
 		}
-		bma250->bw_sel = bw_sel;
+		bma250->state[BMA250_BW_SEL_REG] = bw_sel;
 	}
 
 	mutex_unlock(&bma250->device_mutex);
-	return 0;
-}
-
-static int bma250_get_bandwidth(struct bma250_data *bma250, unsigned char *bw)
-{
-	unsigned char bw_sel;
-
-	if (!bma250)
-		return -1;
-
-	mutex_lock(&bma250->device_mutex);
-
-	if (!bma250_is_suspended(bma250)) {
-		if (bma250_smbus_read_byte(bma250->bma250_client,
-			BMA250_BW__REG, &bw_sel) < 0) {
-			mutex_unlock(&bma250->device_mutex);
-			return -1;
-		}
-		bma250->bw_sel = bw_sel;
-	}
-
-	mutex_unlock(&bma250->device_mutex);
-
-	if (bw)
-		*bw = BMA250_GET_BITSLICE(bw_sel, BMA250_BW);
 	return 0;
 }
 
@@ -897,20 +861,22 @@ static ssize_t bma250_chip_id_show(struct device *dev,
 {
 	int i;
 	const char* chip_name = "unknown";
+	unsigned char chip_id;
 
 	struct i2c_client *client = to_i2c_client(dev);
 	struct bma250_data *bma250 = i2c_get_clientdata(client);
 
-	for (i = 0; chip_id_value[i]; i++)
-	{
-		if (chip_id_value[i] == bma250->chip_id) {
+	chip_id = bma250_chip_id(bma250);
+
+	for (i = 0; chip_id_value[i]; i++) {
+		if (chip_id_value[i] == chip_id) {
 			chip_name = chip_id_name[i];
 			break;
 		}
 	}
 
-	dprintk(DEBUG_CONTROL_INFO, "%s (0x%02X), %s\n", chip_name, bma250->chip_id, __FUNCTION__);
-	return sprintf(buf, "%s (0x%02X)\n", chip_name, bma250->chip_id);
+	dprintk(DEBUG_CONTROL_INFO, "%s (0x%02X), %s\n", chip_name, chip_id, __FUNCTION__);
+	return sprintf(buf, "%s (0x%02X)\n", chip_name, chip_id);
 }
 
 static ssize_t bma250_range_show(struct device *dev,
@@ -921,7 +887,7 @@ static ssize_t bma250_range_show(struct device *dev,
 	struct i2c_client *client = to_i2c_client(dev);
 	struct bma250_data *bma250 = i2c_get_clientdata(client);
 
-	range = BMA250_GET_BITSLICE(bma250->range_sel, BMA250_RANGE_SEL);
+	range = BMA250_GET_STATE_BITSLICE(bma250->state, BMA250_RANGE_SEL);
 	if (bma250_range_name[range])
 		return sprintf(buf, "%s\n", bma250_range_name[range]);
 	return sprintf(buf, "%u\n", (unsigned int) range);
@@ -962,7 +928,7 @@ static ssize_t bma250_bw_show(struct device *dev,
 	struct i2c_client *client = to_i2c_client(dev);
 	struct bma250_data *bma250 = i2c_get_clientdata(client);
 
-	bw_sel = BMA250_GET_BITSLICE(bma250->bw_sel, BMA250_BW);
+	bw_sel = BMA250_GET_STATE_BITSLICE(bma250->state, BMA250_BW);
 
 	return sprintf(buf, "%u\n", (unsigned int) bw_sel);
 }
@@ -993,7 +959,7 @@ static ssize_t bma250_bandwidth_show(struct device *dev,
 	struct i2c_client *client = to_i2c_client(dev);
 	struct bma250_data *bma250 = i2c_get_clientdata(client);
 
-	bw_sel = BMA250_GET_BITSLICE(bma250->bw_sel, BMA250_BW);
+	bw_sel = BMA250_GET_STATE_BITSLICE(bma250->state, BMA250_BW);
 	bandwidth = bma250_bandwidth_frequency[bw_sel];
 
 	return sprintf(buf, "%u.%03u Hz\n",
@@ -1008,7 +974,7 @@ static ssize_t bma250_update_time_show(struct device *dev,
 	struct i2c_client *client = to_i2c_client(dev);
 	struct bma250_data *bma250 = i2c_get_clientdata(client);
 
-	bw_sel = BMA250_GET_BITSLICE(bma250->bw_sel, BMA250_BW);
+	bw_sel = BMA250_GET_STATE_BITSLICE(bma250->state, BMA250_BW);
 	update_time = bma250_bandwidth_update_time[bw_sel];
 
 	return sprintf(buf, "%u.%03u ms\n",
@@ -1060,7 +1026,7 @@ static ssize_t bma250_sleep_dur_show(struct device *dev,
 	struct i2c_client *client = to_i2c_client(dev);
 	struct bma250_data *bma250 = i2c_get_clientdata(client);
 
-	sleep_dur = BMA250_GET_BITSLICE(bma250->mode_ctrl, BMA250_SLEEP_DUR);
+	sleep_dur = BMA250_GET_STATE_BITSLICE(bma250->state, BMA250_SLEEP_DUR);
 	sleep_usecs = bma250_sleep_dur_value[sleep_dur];
 
 	return sprintf(buf, "%u\n", sleep_usecs);
@@ -1294,8 +1260,7 @@ static int bma250_probe(struct i2c_client *client,
 	mutex_init(&data->value_mutex);
 	mutex_init(&data->enable_mutex);
 
-	bma250_get_chip_id(data, NULL);
-	bma250_get_mode(data, NULL);
+	bma250_read_state(data);
 
 	bma250_set_mode(data, BMA250_MODE_SET);
 	bma250_set_sleep_dur(data, BMA250_SLEEP_DUR_SET);
@@ -1388,11 +1353,11 @@ static void bma250_late_resume(struct early_suspend *h)
 	} else if (SUPER_STANDBY == standby_type) {
 		printk("bma250_late_resume\n");
 		if (bma250_smbus_write_byte(data->bma250_client,
-			BMA250_BW_SEL_REG, &data->bw_sel) < 0)
+			BMA250_BW_SEL_REG, &data->state[BMA250_BW_SEL_REG]) < 0)
 			printk("suspend: write bandwidth err\n");
 
 		if (bma250_smbus_write_byte(data->bma250_client,
-			BMA250_RANGE_SEL_REG, &data->range_sel) < 0)
+			BMA250_RANGE_SEL_REG, &data->state[BMA250_RANGE_SEL_REG]) < 0)
 			printk("suspend: write range err\n");
 
 		mutex_lock(&data->enable_mutex);
@@ -1418,11 +1383,11 @@ static int bma250_resume(struct i2c_client *client)
 		mutex_unlock(&data->enable_mutex);
 	} else if (SUPER_STANDBY == standby_type) {
 		if (bma250_smbus_write_byte(data->bma250_client,
-			BMA250_BW_SEL_REG, &data->bw_sel) < 0)
+			BMA250_BW_SEL_REG, &data->state[BMA250_BW_SEL_REG]) < 0)
 			printk("suspend: write bandwidth err\n");
 
 		if (bma250_smbus_write_byte(data->bma250_client,
-			BMA250_RANGE_SEL_REG, &data->range_sel) < 0)
+			BMA250_RANGE_SEL_REG, &data->state[BMA250_RANGE_SEL_REG]) < 0)
 			printk("suspend: write range err\n");
 
 		mutex_lock(&data->enable_mutex);
