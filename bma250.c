@@ -293,7 +293,7 @@ const char* bma250_mode_name[] = {
 
 
 
-struct bma250acc {
+struct bma250_acc {
 	s16	x, y, z;
 };
 
@@ -312,7 +312,7 @@ struct bma250_data {
 	atomic_t delay;
 	atomic_t enable;
 	struct input_dev *input;
-	struct bma250acc value;
+	struct bma250_acc value;
 	struct mutex value_mutex;
 	struct mutex enable_mutex;
 	struct delayed_work work;
@@ -746,52 +746,38 @@ static int bma250_get_bandwidth(struct bma250_data *bma250, unsigned char *bw)
 	return 0;
 }
 
-static int bma250_read_accel_xyz(struct i2c_client *client,
-							struct bma250acc *acc)
+static int bma250_read_accel_xyz(struct bma250_data *bma250, struct bma250_acc *acc)
 {
-	int comres;
-	unsigned char data[6] = {0};
-	if (client == NULL) {
-		comres = -1;
-	} else {
-		comres = i2c_smbus_read_i2c_block_data(client, BMA250_ACC_X_LSB__REG, 6, data);
+	unsigned char data[6];
 
-		acc->x = BMA250_GET_BITSLICE(data[0], BMA250_ACC_X_LSB)
-			|(BMA250_GET_BITSLICE(data[1],
-				BMA250_ACC_X_MSB)<<BMA250_ACC_X_LSB__LEN);
-		acc->x = acc->x << (sizeof(short)*8-(BMA250_ACC_X_LSB__LEN
-					+ BMA250_ACC_X_MSB__LEN));
-		acc->x = acc->x >> (sizeof(short)*8-(BMA250_ACC_X_LSB__LEN
-					+ BMA250_ACC_X_MSB__LEN));
-		acc->y = BMA250_GET_BITSLICE(data[2], BMA250_ACC_Y_LSB)
-			| (BMA250_GET_BITSLICE(data[3],
-				BMA250_ACC_Y_MSB)<<BMA250_ACC_Y_LSB__LEN);
-		acc->y = acc->y << (sizeof(short)*8-(BMA250_ACC_Y_LSB__LEN
-					+ BMA250_ACC_Y_MSB__LEN));
-		acc->y = acc->y >> (sizeof(short)*8-(BMA250_ACC_Y_LSB__LEN
-					+ BMA250_ACC_Y_MSB__LEN));
+	if (!bma250)
+		return -1;
 
-		acc->z = BMA250_GET_BITSLICE(data[4], BMA250_ACC_Z_LSB)
-			| (BMA250_GET_BITSLICE(data[5],
-				BMA250_ACC_Z_MSB)<<BMA250_ACC_Z_LSB__LEN);
-		acc->z = acc->z << (sizeof(short)*8-(BMA250_ACC_Z_LSB__LEN
-					+ BMA250_ACC_Z_MSB__LEN));
-		acc->z = acc->z >> (sizeof(short)*8-(BMA250_ACC_Z_LSB__LEN
-					+ BMA250_ACC_Z_MSB__LEN));
-	}
+	if (i2c_smbus_read_i2c_block_data(bma250->bma250_client,
+		BMA250_ACC_X_LSB__REG, 6, data) < 0)
+		return -1;
 
-	return comres;
+	acc->x = BMA250_GET_BITSLICE(data[0], BMA250_ACC_X_LSB)
+		| (BMA250_GET_BITSLICE(data[1], BMA250_ACC_X_MSB) << BMA250_ACC_X_LSB__LEN);
+
+	acc->y = BMA250_GET_BITSLICE(data[2], BMA250_ACC_Y_LSB)
+		| (BMA250_GET_BITSLICE(data[3], BMA250_ACC_Y_MSB) << BMA250_ACC_Y_LSB__LEN);
+
+	acc->z = BMA250_GET_BITSLICE(data[4], BMA250_ACC_Z_LSB)
+		| (BMA250_GET_BITSLICE(data[5], BMA250_ACC_Z_MSB) << BMA250_ACC_Z_LSB__LEN);
+
+	return 0;
 }
 
 static void bma250_work_func(struct work_struct *work)
 {
 	struct bma250_data *bma250 = container_of((struct delayed_work *)work,
 			struct bma250_data, work);
-	static struct bma250acc acc;
+	static struct bma250_acc acc;
 	unsigned long delay = msecs_to_jiffies(atomic_read(&bma250->delay));
 
 	if (!bma250_is_suspended(bma250)) {
-		bma250_read_accel_xyz(bma250->bma250_client, &acc);
+		bma250_read_accel_xyz(bma250, &acc);
 		input_report_abs(bma250->input, ABS_X, acc.x);
 		input_report_abs(bma250->input, ABS_Y, acc.y);
 		input_report_abs(bma250->input, ABS_Z, acc.z);
@@ -1014,7 +1000,7 @@ static ssize_t bma250_value_show(struct device *dev,
 {
 	struct input_dev *input = to_input_dev(dev);
 	struct bma250_data *bma250 = input_get_drvdata(input);
-	struct bma250acc acc_value;
+	struct bma250_acc acc_value;
 
 	mutex_lock(&bma250->value_mutex);
 	acc_value = bma250->value;
