@@ -180,6 +180,11 @@ enum bma_chip_id
 #define BMA250_BW__MSK                          0x1F
 #define BMA250_BW__REG                          BMA250_BW_SEL_REG
 
+#define BMA250E_LOW_POWER_MODE__POS             6
+#define BMA250E_LOW_POWER_MODE__LEN             1
+#define BMA250E_LOW_POWER_MODE__MSK             0x40
+#define BMA250E_LOW_POWER_MODE__REG             BMA250_LOW_NOISE_CTRL_REG
+
 #define BMA250_EN_LOW_POWER__POS                6
 #define BMA250_EN_LOW_POWER__LEN                1
 #define BMA250_EN_LOW_POWER__MSK                0x40
@@ -246,16 +251,22 @@ static unsigned int bma250_bandwidth_update_time[] = {
 
 enum bma250_mode {
 	BMA250_MODE_NORMAL,
-	BMA250_MODE_LOWPOWER,
+	BMA250_MODE_LOWPOWER1,
 	BMA250_MODE_SUSPEND,
+
+	BMA250E_MODE_LOWPOWER2,
+	BMA250E_MODE_STANDBY,
 
 	BMA250_MODE_COUNT
 };
 
 const char* bma250_mode_name[] = {
 	"normal",
-	"lowpower",
+	"lowpower1",
 	"suspend",
+
+	"lowpower2",
+	"standby",
 
 	NULL
 };
@@ -274,6 +285,7 @@ struct bma250_data {
 	enum bma250_mode mode;
 
 	unsigned char mode_ctrl;
+	unsigned char low_noise_ctrl;
 	unsigned char range_sel;
 	unsigned char bw_sel;
 
@@ -403,7 +415,9 @@ static int bma250_get_chip_id(struct bma250_data *bma250, enum bma_chip_id *chip
 
 static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 {
+	int mode_dirty = 0;
 	unsigned char mode_ctrl;
+	unsigned char low_noise_ctrl;
 
 	if (!bma250 || (mode >= BMA250_MODE_COUNT))
 		return -1;
@@ -411,10 +425,23 @@ static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 	if (bma250->mode == mode)
 		return 0;
 
-	mode_ctrl = bma250->mode_ctrl;
+	if (bma250->chip_id <= BMA_CHIP_ID_250) {
+		switch (mode) {
+		case BMA250E_MODE_LOWPOWER2:
+		case BMA250E_MODE_STANDBY:
+			printk(KERN_WARNING "Attempting to switch to unsupported mode.\n");
+			return -1;
+		default:
+			break;
+		}
+	}
+
+	mode_ctrl      = bma250->mode_ctrl;
+	low_noise_ctrl = bma250->low_noise_ctrl;
 
 	switch (mode) {
-	case BMA250_MODE_LOWPOWER:
+	case BMA250_MODE_LOWPOWER1:
+	case BMA250E_MODE_LOWPOWER2:
 		mode_ctrl = BMA250_SET_BITSLICE(mode_ctrl, BMA250_EN_LOW_POWER, 1);
 		break;
 	default:
@@ -424,6 +451,7 @@ static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 
 	switch (mode) {
 	case BMA250_MODE_SUSPEND:
+	case BMA250E_MODE_STANDBY:
 		mode_ctrl = BMA250_SET_BITSLICE(mode_ctrl, BMA250_EN_SUSPEND, 1);
 		break;
 	default:
@@ -431,10 +459,41 @@ static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 		break;
 	}
 
+	switch (mode) {
+	case BMA250E_MODE_LOWPOWER2:
+	case BMA250E_MODE_STANDBY:
+		low_noise_ctrl = BMA250_SET_BITSLICE(low_noise_ctrl, BMA250E_LOW_POWER_MODE, 1);
+		break;
+	default:
+		low_noise_ctrl = BMA250_SET_BITSLICE(low_noise_ctrl, BMA250E_LOW_POWER_MODE, 0);
+		break;
+	}
+
+	if (low_noise_ctrl != bma250->low_noise_ctrl) {
+		if (bma250->mode != BMA250_MODE_NORMAL)
+		{
+			if (bma250_set_mode(bma250, BMA250_MODE_NORMAL) < 0)
+				return -1;
+			mode_dirty = 1;
+		}
+
+		if (bma250_smbus_write_byte(bma250->bma250_client,
+			BMA250_LOW_NOISE_CTRL_REG, &low_noise_ctrl) < 0) {
+			if (mode_dirty)
+				printk(KERN_WARNING "BMA250 mode set failed, switched to NORMAL mode.\n");
+			return -1;
+		}
+
+		bma250->low_noise_ctrl = low_noise_ctrl;
+	}
+
 	if (mode_ctrl != bma250->mode_ctrl) {
 		if (bma250_smbus_write_byte(bma250->bma250_client,
-			BMA250_MODE_CTRL_REG, &mode_ctrl) < 0)
+			BMA250_MODE_CTRL_REG, &mode_ctrl) < 0) {
+			if (mode_dirty)
+				printk(KERN_WARNING "BMA250 mode set failed, switched to NORMAL mode.\n");
 			return -1;
+		}
 
 		bma250->mode_ctrl = mode_ctrl;
 		bma250->mode      = mode;
@@ -446,20 +505,30 @@ static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 static int bma250_get_mode(struct bma250_data *bma250, unsigned char *mode)
 {
 	unsigned char mode_ctrl;
+	unsigned char low_noise_ctrl;
 
 	if (!bma250)
 		return -1;
 
-	if (bma250_smbus_read_byte(bma250->bma250_client,
+	if ((bma250_smbus_read_byte(bma250->bma250_client,
 		BMA250_MODE_CTRL_REG, &mode_ctrl) < 0)
+		|| (bma250_smbus_read_byte(bma250->bma250_client,
+			BMA250_LOW_NOISE_CTRL_REG, &low_noise_ctrl) < 0))
 		return -1;
 
 	bma250->mode_ctrl = mode_ctrl;
+	bma250->low_noise_ctrl = low_noise_ctrl;
 
 	if(BMA250_GET_BITSLICE(mode_ctrl, BMA250_EN_SUSPEND)) {
-		bma250->mode = BMA250_MODE_SUSPEND;
+		if (BMA250_GET_BITSLICE(low_noise_ctrl, BMA250E_LOW_POWER_MODE))
+			bma250->mode = BMA250E_MODE_STANDBY;
+		else
+			bma250->mode = BMA250_MODE_SUSPEND;
 	} else if(BMA250_GET_BITSLICE(mode_ctrl, BMA250_EN_LOW_POWER)) {
-		bma250->mode = BMA250_MODE_LOWPOWER;
+		if (BMA250_GET_BITSLICE(low_noise_ctrl, BMA250E_LOW_POWER_MODE))
+			bma250->mode = BMA250_MODE_LOWPOWER1;
+		else
+			bma250->mode = BMA250E_MODE_LOWPOWER2;
 	} else {
 		bma250->mode = BMA250_MODE_NORMAL;
 	}
@@ -990,6 +1059,7 @@ static int bma250_probe(struct i2c_client *client,
 	mutex_init(&data->enable_mutex);
 
 	bma250_get_chip_id(data, NULL);
+	bma250_get_mode(data, NULL);
 
 	bma250_set_mode(data, BMA250_MODE_SET);
 	bma250_set_bandwidth(data, BMA250_BW_SET);
