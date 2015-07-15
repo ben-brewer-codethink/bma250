@@ -71,6 +71,7 @@ enum bma_chip_id
 };
 
 #define BMA250_MODE_SET                         BMA250_MODE_NORMAL
+#define BMA250_SLEEP_DUR_SET                    100000
 #define BMA250_RANGE_SET                        BMA250_RANGE_2G
 #define BMA250_BW_SET                           BMA250_BW_125HZ
 
@@ -185,6 +186,11 @@ enum bma_chip_id
 #define BMA250E_LOW_POWER_MODE__MSK             0x40
 #define BMA250E_LOW_POWER_MODE__REG             BMA250_LOW_NOISE_CTRL_REG
 
+#define BMA250_SLEEP_DUR__POS                   1
+#define BMA250_SLEEP_DUR__LEN                   4
+#define BMA250_SLEEP_DUR__MSK                   0x1E
+#define BMA250_SLEEP_DUR__REG                   BMA250_MODE_CTRL_REG
+
 #define BMA250_EN_LOW_POWER__POS                6
 #define BMA250_EN_LOW_POWER__LEN                1
 #define BMA250_EN_LOW_POWER__MSK                0x40
@@ -245,6 +251,13 @@ static unsigned int bma250_bandwidth_update_time[] = {
 	64000, 32000, 16000,  8000,  4000,  2000,  1000,   500,
 	  500,   500,   500,   500,   500,   500,   500,   500,
 	  500,   500,   500,   500,   500,   500,   500,   500,
+};
+
+static unsigned int bma250_sleep_dur_value[] = {
+	  500,    500,    500,     500,
+	  500,    500,   1000,    2000,
+	 4000,   6000,  10000,   25000,
+	50000, 100000, 500000, 1000000,
 };
 
 /* mode settings */
@@ -535,6 +548,38 @@ static int bma250_get_mode(struct bma250_data *bma250, unsigned char *mode)
 
 	if (mode)
 		*mode = bma250->mode;
+	return 0;
+}
+
+static unsigned char bma250_usecs_to_sleep_duration(unsigned int usecs)
+{
+	unsigned char i;
+	for (i = 0; i < 15; i++) {
+		if (usecs <= bma250_sleep_dur_value[i])
+			break;
+	}
+	return i;
+}
+
+static int bma250_set_sleep_dur(struct bma250_data *bma250, unsigned int usecs)
+{
+	unsigned char mode_ctrl;
+	unsigned char sleep_dur;
+
+	if (!bma250)
+		return -1;
+
+	sleep_dur = bma250_usecs_to_sleep_duration(usecs);
+
+	mode_ctrl = bma250->mode_ctrl;
+	mode_ctrl = BMA250_SET_BITSLICE(mode_ctrl, BMA250_SLEEP_DUR, sleep_dur);
+
+	if ((mode_ctrl != bma250->mode_ctrl)
+		&& (bma250_smbus_write_byte(bma250->bma250_client,
+			BMA250_MODE_CTRL_REG, &mode_ctrl) < 0))
+		return -1;
+
+	bma250->mode_ctrl = mode_ctrl;
 	return 0;
 }
 
@@ -851,6 +896,41 @@ static ssize_t bma250_mode_store(struct device *dev,
 	return -EINVAL;
 }
 
+static ssize_t bma250_sleep_dur_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	unsigned char sleep_dur;
+	unsigned int sleep_usecs;
+
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	sleep_dur = BMA250_GET_BITSLICE(bma250->mode_ctrl, BMA250_SLEEP_DUR);
+	sleep_usecs = bma250_sleep_dur_value[sleep_dur];
+
+	return sprintf(buf, "%u\n", sleep_usecs);
+}
+
+static ssize_t bma250_sleep_dur_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	unsigned long sleep_usecs;
+	int error;
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	error = strict_strtoul(buf, 10, &sleep_usecs);
+
+	if (error)
+		return error;
+
+	if (bma250_set_sleep_dur(bma250, sleep_usecs) < 0)
+		return -EINVAL;
+
+	return count;
+}
+
 
 static ssize_t bma250_value_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -972,6 +1052,8 @@ static DEVICE_ATTR(update_time, S_IRUGO,
 		bma250_update_time_show, NULL);
 static DEVICE_ATTR(mode, S_IRUGO|S_IWUSR|S_IWGRP,
 		bma250_mode_show, bma250_mode_store);
+static DEVICE_ATTR(sleep_dur, S_IRUGO|S_IWUSR|S_IWGRP,
+		bma250_sleep_dur_show, bma250_sleep_dur_store);
 static DEVICE_ATTR(value, S_IRUGO,
 		bma250_value_show, NULL);
 static DEVICE_ATTR(delay, S_IRUGO|S_IWUSR|S_IWGRP,
@@ -986,6 +1068,7 @@ static struct attribute *bma250_attributes[] = {
 	&dev_attr_bandwidth.attr,
 	&dev_attr_update_time.attr,
 	&dev_attr_mode.attr,
+	&dev_attr_sleep_dur.attr,
 	&dev_attr_value.attr,
 	&dev_attr_delay.attr,
 	&dev_attr_enable.attr,
@@ -1062,6 +1145,7 @@ static int bma250_probe(struct i2c_client *client,
 	bma250_get_mode(data, NULL);
 
 	bma250_set_mode(data, BMA250_MODE_SET);
+	bma250_set_sleep_dur(data, BMA250_SLEEP_DUR_SET);
 	bma250_set_bandwidth(data, BMA250_BW_SET);
 	bma250_set_range(data, BMA250_RANGE_SET);
 
