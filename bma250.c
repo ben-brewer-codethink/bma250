@@ -70,6 +70,7 @@ enum bma_chip_id
 	BMA_CHIP_ID_280  = 0xFB,
 };
 
+#define BMA250_MODE_SET                         BMA250_MODE_NORMAL
 #define BMA250_RANGE_SET                        BMA250_RANGE_2G
 #define BMA250_BW_SET                           BMA250_BW_125HZ
 
@@ -243,9 +244,21 @@ static unsigned int bma250_bandwidth_update_time[] = {
 
 /* mode settings */
 
-#define BMA250_MODE_NORMAL                      0
-#define BMA250_MODE_LOWPOWER                    1
-#define BMA250_MODE_SUSPEND                     2
+enum bma250_mode {
+	BMA250_MODE_NORMAL,
+	BMA250_MODE_LOWPOWER,
+	BMA250_MODE_SUSPEND,
+
+	BMA250_MODE_COUNT
+};
+
+const char* bma250_mode_name[] = {
+	"normal",
+	"lowpower",
+	"suspend",
+
+	NULL
+};
 
 
 
@@ -258,12 +271,14 @@ struct bma250_data {
 
 	enum bma_chip_id chip_id;
 
+	enum bma250_mode mode;
+
+	unsigned char mode_ctrl;
 	unsigned char range_sel;
 	unsigned char bw_sel;
 
 	atomic_t delay;
 	atomic_t enable;
-	unsigned char mode;
 	struct input_dev *input;
 	struct bma250acc value;
 	struct mutex value_mutex;
@@ -386,65 +401,72 @@ static int bma250_get_chip_id(struct bma250_data *bma250, enum bma_chip_id *chip
 	return 0;
 }
 
-static int bma250_set_mode(struct i2c_client *client, unsigned char Mode)
+static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 {
-	int comres = 0;
-	unsigned char data1 = '\0';
+	unsigned char mode_ctrl;
 
-	if (client == NULL) {
-		comres = -1;
-	} else {
-		if (Mode < 3) {
-			comres = bma250_smbus_read_byte(client,
-					BMA250_EN_LOW_POWER__REG, &data1);
-			switch (Mode) {
-			case BMA250_MODE_NORMAL:
-				data1  = BMA250_SET_BITSLICE(data1,
-					BMA250_EN_LOW_POWER, 0);
-				data1  = BMA250_SET_BITSLICE(data1,
-					BMA250_EN_SUSPEND, 0);
-				break;
-			case BMA250_MODE_LOWPOWER:
-				data1  = BMA250_SET_BITSLICE(data1,
-					BMA250_EN_LOW_POWER, 1);
-				data1  = BMA250_SET_BITSLICE(data1,
-					BMA250_EN_SUSPEND, 0);
-				break;
-			case BMA250_MODE_SUSPEND:
-				data1  = BMA250_SET_BITSLICE(data1,
-					BMA250_EN_LOW_POWER, 0);
-				data1  = BMA250_SET_BITSLICE(data1,
-					BMA250_EN_SUSPEND, 1);
-				break;
-			default:
-				break;
-			}
+	if (!bma250 || (mode >= BMA250_MODE_COUNT))
+		return -1;
 
-			comres += bma250_smbus_write_byte(client,
-					BMA250_EN_LOW_POWER__REG, &data1);
-		} else {
-			comres = -1;
-		}
+	if (bma250->mode == mode)
+		return 0;
+
+	mode_ctrl = bma250->mode_ctrl;
+
+	switch (mode) {
+	case BMA250_MODE_LOWPOWER:
+		mode_ctrl = BMA250_SET_BITSLICE(mode_ctrl, BMA250_EN_LOW_POWER, 1);
+		break;
+	default:
+		mode_ctrl = BMA250_SET_BITSLICE(mode_ctrl, BMA250_EN_LOW_POWER, 0);
+		break;
 	}
 
-	return comres;
+	switch (mode) {
+	case BMA250_MODE_SUSPEND:
+		mode_ctrl = BMA250_SET_BITSLICE(mode_ctrl, BMA250_EN_SUSPEND, 1);
+		break;
+	default:
+		mode_ctrl = BMA250_SET_BITSLICE(mode_ctrl, BMA250_EN_SUSPEND, 0);
+		break;
+	}
+
+	if (mode_ctrl != bma250->mode_ctrl) {
+		if (bma250_smbus_write_byte(bma250->bma250_client,
+			BMA250_MODE_CTRL_REG, &mode_ctrl) < 0)
+			return -1;
+
+		bma250->mode_ctrl = mode_ctrl;
+		bma250->mode      = mode;
+	}
+
+	return 0;
 }
 
-static int bma250_get_mode(struct i2c_client *client, unsigned char *mode)
+static int bma250_get_mode(struct bma250_data *bma250, unsigned char *mode)
 {
-	int comres = 0;
+	unsigned char mode_ctrl;
 
-	if (client == NULL) {
-		comres = -1;
+	if (!bma250)
+		return -1;
+
+	if (bma250_smbus_read_byte(bma250->bma250_client,
+		BMA250_MODE_CTRL_REG, &mode_ctrl) < 0)
+		return -1;
+
+	bma250->mode_ctrl = mode_ctrl;
+
+	if(BMA250_GET_BITSLICE(mode_ctrl, BMA250_EN_SUSPEND)) {
+		bma250->mode = BMA250_MODE_SUSPEND;
+	} else if(BMA250_GET_BITSLICE(mode_ctrl, BMA250_EN_LOW_POWER)) {
+		bma250->mode = BMA250_MODE_LOWPOWER;
 	} else {
-		unsigned char modebits;
-		comres = bma250_smbus_read_byte(client,
-				BMA250_EN_LOW_POWER__REG, &modebits);
-		if (mode && (comres == 0))
-			*mode  = modebits >> 6;
+		bma250->mode = BMA250_MODE_NORMAL;
 	}
 
-	return comres;
+	if (mode)
+		*mode = bma250->mode;
+	return 0;
 }
 
 static int bma250_set_range(struct bma250_data *bma250, enum bma250_range range)
@@ -727,33 +749,37 @@ static ssize_t bma250_update_time_show(struct device *dev,
 static ssize_t bma250_mode_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	unsigned char data;
 	struct i2c_client *client = to_i2c_client(dev);
 	struct bma250_data *bma250 = i2c_get_clientdata(client);
 
-	if (bma250_get_mode(bma250->bma250_client, &data) < 0)
-		return sprintf(buf, "Read error\n");
+	const char* mode_name = "unknown";
 
-	dprintk(DEBUG_CONTROL_INFO, "%d, %s\n", data, __FUNCTION__);
-	return sprintf(buf, "%d\n", data);
+	if (bma250->mode < BMA250_MODE_COUNT)
+		mode_name = bma250_mode_name[bma250->mode];
+
+	return sprintf(buf, "%s\n", mode_name);
 }
 
 static ssize_t bma250_mode_store(struct device *dev,
 		struct device_attribute *attr,
 		const char *buf, size_t count)
 {
-	unsigned long data;
-	int error;
+	int i;
 	struct i2c_client *client = to_i2c_client(dev);
 	struct bma250_data *bma250 = i2c_get_clientdata(client);
 
-	error = strict_strtoul(buf, 10, &data);
-	if (error)
-		return error;
-	if (bma250_set_mode(bma250->bma250_client, (unsigned char) data) < 0)
-		return -EINVAL;
+	for (i = 0; bma250_mode_name[i]; i++) {
+		if (strcmp(bma250_mode_name[i], buf) == 0) {
+			if (bma250_set_mode(bma250, i) < 0) {
+				printk(KERN_WARNING "Failed to set mode '%.*s'.\n", count, buf);
+			} else {
+				return count;
+			}
+		}
+	}
 
-	return count;
+	printk(KERN_WARNING "Invalid mode '%.*s'.\n", count, buf);
+	return -EINVAL;
 }
 
 
@@ -828,7 +854,7 @@ static void bma250_set_enable(struct device *dev, int enable)
 	mutex_lock(&bma250->enable_mutex);
 
 	if (enable && !pre_enable) {
-		bma250_set_mode(bma250->bma250_client,
+		bma250_set_mode(bma250,
 						BMA250_MODE_NORMAL);
 		schedule_delayed_work(&bma250->work,
 			msecs_to_jiffies(atomic_read(&bma250->delay)));
@@ -836,7 +862,7 @@ static void bma250_set_enable(struct device *dev, int enable)
 	} else if (!enable && pre_enable) {
 		printk("bma250_set_enable pre_enable\n");
 /*
-		bma250_set_mode(bma250->bma250_client,
+		bma250_set_mode(bma250,
 						BMA250_MODE_SUSPEND);
 		cancel_delayed_work_sync(&bma250->work);
 */
@@ -965,6 +991,7 @@ static int bma250_probe(struct i2c_client *client,
 
 	bma250_get_chip_id(data, NULL);
 
+	bma250_set_mode(data, BMA250_MODE_SET);
 	bma250_set_bandwidth(data, BMA250_BW_SET);
 	bma250_set_range(data, BMA250_RANGE_SET);
 
@@ -1021,7 +1048,7 @@ static void bma250_early_suspend(struct early_suspend *h)
 /*
 		mutex_lock(&data->enable_mutex);
 		if (atomic_read(&data->enable) == 1) {
-			bma250_set_mode(data->bma250_client, BMA250_MODE_SUSPEND);
+			bma250_set_mode(data, BMA250_MODE_SUSPEND);
 			cancel_delayed_work_sync(&data->work);
 		}
 		mutex_unlock(&data->enable_mutex);
@@ -1029,7 +1056,7 @@ static void bma250_early_suspend(struct early_suspend *h)
 	} else if (SUPER_STANDBY == standby_type) {
 		mutex_lock(&data->enable_mutex);
 		if (atomic_read(&data->enable) == 1) {
-			bma250_set_mode(data->bma250_client, BMA250_MODE_SUSPEND);
+			bma250_set_mode(data, BMA250_MODE_SUSPEND);
 			cancel_delayed_work_sync(&data->work);
 		}
 		mutex_unlock(&data->enable_mutex);
@@ -1049,7 +1076,7 @@ static void bma250_late_resume(struct early_suspend *h)
 /*
 		mutex_lock(&data->enable_mutex);
 		if (atomic_read(&data->enable) == 1) {
-			bma250_set_mode(data->bma250_client, BMA250_MODE_NORMAL);
+			bma250_set_mode(data, BMA250_MODE_NORMAL);
 			schedule_delayed_work(&data->work,
 				msecs_to_jiffies(atomic_read(&data->delay)));
 		}
@@ -1067,7 +1094,7 @@ static void bma250_late_resume(struct early_suspend *h)
 
 		mutex_lock(&data->enable_mutex);
 		if (atomic_read(&data->enable) == 1) {
-			bma250_set_mode(data->bma250_client, BMA250_MODE_NORMAL);
+			bma250_set_mode(data, BMA250_MODE_NORMAL);
 			schedule_delayed_work(&data->work,
 				msecs_to_jiffies(atomic_read(&data->delay)));
 		}
@@ -1086,7 +1113,7 @@ static int bma250_resume(struct i2c_client *client)
 		mutex_lock(&data->enable_mutex);
 		
 		if (atomic_read(&data->enable) == 1) {
-			bma250_set_mode(data->bma250_client, BMA250_MODE_NORMAL);
+			bma250_set_mode(data, BMA250_MODE_NORMAL);
 			schedule_delayed_work(&data->work,
 				msecs_to_jiffies(atomic_read(&data->delay)));
 		}
@@ -1103,7 +1130,7 @@ static int bma250_resume(struct i2c_client *client)
 
 		mutex_lock(&data->enable_mutex);
 		if (atomic_read(&data->enable) == 1) {
-			bma250_set_mode(data->bma250_client, BMA250_MODE_NORMAL);
+			bma250_set_mode(data, BMA250_MODE_NORMAL);
 			schedule_delayed_work(&data->work,
 				msecs_to_jiffies(atomic_read(&data->delay)));
 		}
@@ -1122,7 +1149,7 @@ static int bma250_suspend(struct i2c_client *client, pm_message_t mesg)
 		mutex_lock(&data->enable_mutex);
 
 		if (atomic_read(&data->enable) == 1) {
-			bma250_set_mode(data->bma250_client, BMA250_MODE_SUSPEND);
+			bma250_set_mode(data, BMA250_MODE_SUSPEND);
 			cancel_delayed_work_sync(&data->work);
 		}
 
@@ -1130,7 +1157,7 @@ static int bma250_suspend(struct i2c_client *client, pm_message_t mesg)
 	} else if (SUPER_STANDBY == standby_type) {
 		mutex_lock(&data->enable_mutex);
 		if (atomic_read(&data->enable) == 1) {
-			bma250_set_mode(data->bma250_client, BMA250_MODE_SUSPEND);
+			bma250_set_mode(data, BMA250_MODE_SUSPEND);
 			cancel_delayed_work_sync(&data->work);
 		}
 		mutex_unlock(&data->enable_mutex);
