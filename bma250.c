@@ -1143,8 +1143,8 @@ static void bma250_set_enable(struct device *dev, int enable)
 		bma250_set_mode(bma250,
 						BMA250_MODE_SUSPEND);
 		cancel_delayed_work_sync(&bma250->work);
-*/
 		atomic_set(&bma250->enable, 0);
+*/
 	}
 
 	mutex_unlock(&bma250->enable_mutex);
