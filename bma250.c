@@ -191,6 +191,11 @@ enum bma_chip_id
 #define BMA250_SLEEP_DUR__MSK                   0x1E
 #define BMA250_SLEEP_DUR__REG                   BMA250_MODE_CTRL_REG
 
+#define BMA250E_DEEP_SUSPEND__POS               5
+#define BMA250E_DEEP_SUSPEND__LEN               1
+#define BMA250E_DEEP_SUSPEND__MSK               0x20
+#define BMA250E_DEEP_SUSPEND__REG               BMA250_MODE_CTRL_REG
+
 #define BMA250_EN_LOW_POWER__POS                6
 #define BMA250_EN_LOW_POWER__LEN                1
 #define BMA250_EN_LOW_POWER__MSK                0x40
@@ -269,6 +274,7 @@ enum bma250_mode {
 
 	BMA250E_MODE_LOWPOWER2,
 	BMA250E_MODE_STANDBY,
+	BMA250E_MODE_DEEP_SUSPEND,
 
 	BMA250_MODE_COUNT
 };
@@ -280,6 +286,7 @@ const char* bma250_mode_name[] = {
 
 	"lowpower2",
 	"standby",
+	"deep-suspend",
 
 	NULL
 };
@@ -426,6 +433,47 @@ static int bma250_get_chip_id(struct bma250_data *bma250, enum bma_chip_id *chip
 	return 0;
 }
 
+static int bma250_deep_suspend(struct bma250_data *bma250, int enable)
+{
+	unsigned char mode_ctrl;
+
+	if (!bma250 || (enable != !!enable))
+		return -1;
+
+	if (bma250->chip_id <= BMA_CHIP_ID_250) {
+		printk(KERN_WARNING "BMA device doesn't support deep suspend.\n");
+		return -1;
+	}
+
+	mode_ctrl = bma250->mode_ctrl;
+
+	if (enable == BMA250_GET_BITSLICE(mode_ctrl, BMA250E_DEEP_SUSPEND))
+		return 0;
+
+	mode_ctrl = BMA250_SET_BITSLICE(mode_ctrl, BMA250E_DEEP_SUSPEND, enable);
+	mode_ctrl = BMA250_SET_BITSLICE(mode_ctrl, BMA250_EN_LOW_POWER, 0);
+	mode_ctrl = BMA250_SET_BITSLICE(mode_ctrl, BMA250_EN_SUSPEND, 0);
+
+	if (bma250_smbus_write_byte(bma250->bma250_client,
+		BMA250_MODE_CTRL_REG, &mode_ctrl) < 0)
+		return -1;
+	bma250->mode_ctrl = mode_ctrl;
+	bma250->mode = (enable ? BMA250E_MODE_DEEP_SUSPEND : BMA250_MODE_NORMAL);
+
+	if (!enable) {
+		bma250_smbus_write_byte(bma250->bma250_client,
+			BMA250_MODE_CTRL_REG, &mode_ctrl);
+		bma250_smbus_write_byte(bma250->bma250_client,
+			BMA250_LOW_NOISE_CTRL_REG, &bma250->low_noise_ctrl);
+		bma250_smbus_write_byte(bma250->bma250_client,
+			BMA250_RANGE_SEL_REG, &bma250->range_sel);
+		bma250_smbus_write_byte(bma250->bma250_client,
+			BMA250_BW_SEL_REG, &bma250->bw_sel);
+	}
+
+	return 0;
+}
+
 static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 {
 	int mode_dirty = 0;
@@ -442,12 +490,20 @@ static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 		switch (mode) {
 		case BMA250E_MODE_LOWPOWER2:
 		case BMA250E_MODE_STANDBY:
+		case BMA250E_MODE_DEEP_SUSPEND:
 			printk(KERN_WARNING "Attempting to switch to unsupported mode.\n");
 			return -1;
 		default:
 			break;
 		}
 	}
+
+	if (mode == BMA250E_MODE_DEEP_SUSPEND)
+		return bma250_deep_suspend(bma250, 1);
+
+	if ((bma250->mode == BMA250E_MODE_DEEP_SUSPEND)
+		&& (bma250_deep_suspend(bma250, 0) < 0))
+		return -1;
 
 	mode_ctrl      = bma250->mode_ctrl;
 	low_noise_ctrl = bma250->low_noise_ctrl;
@@ -515,6 +571,17 @@ static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 	return 0;
 }
 
+static int bma250_is_suspended(struct bma250_data *bma250)
+{
+	switch (bma250->mode) {
+	case BMA250E_MODE_DEEP_SUSPEND:
+		return 1;
+	default:
+		break;
+	}
+	return 0;
+}
+
 static int bma250_get_mode(struct bma250_data *bma250, unsigned char *mode)
 {
 	unsigned char mode_ctrl;
@@ -523,27 +590,31 @@ static int bma250_get_mode(struct bma250_data *bma250, unsigned char *mode)
 	if (!bma250)
 		return -1;
 
-	if ((bma250_smbus_read_byte(bma250->bma250_client,
-		BMA250_MODE_CTRL_REG, &mode_ctrl) < 0)
-		|| (bma250_smbus_read_byte(bma250->bma250_client,
-			BMA250_LOW_NOISE_CTRL_REG, &low_noise_ctrl) < 0))
-		return -1;
+	if (!bma250_is_suspended(bma250)) {
+		if ((bma250_smbus_read_byte(bma250->bma250_client,
+			BMA250_MODE_CTRL_REG, &mode_ctrl) < 0)
+			|| (bma250_smbus_read_byte(bma250->bma250_client,
+				BMA250_LOW_NOISE_CTRL_REG, &low_noise_ctrl) < 0))
+			return -1;
 
-	bma250->mode_ctrl = mode_ctrl;
-	bma250->low_noise_ctrl = low_noise_ctrl;
+		bma250->mode_ctrl = mode_ctrl;
+		bma250->low_noise_ctrl = low_noise_ctrl;
 
-	if(BMA250_GET_BITSLICE(mode_ctrl, BMA250_EN_SUSPEND)) {
-		if (BMA250_GET_BITSLICE(low_noise_ctrl, BMA250E_LOW_POWER_MODE))
-			bma250->mode = BMA250E_MODE_STANDBY;
-		else
-			bma250->mode = BMA250_MODE_SUSPEND;
-	} else if(BMA250_GET_BITSLICE(mode_ctrl, BMA250_EN_LOW_POWER)) {
-		if (BMA250_GET_BITSLICE(low_noise_ctrl, BMA250E_LOW_POWER_MODE))
-			bma250->mode = BMA250_MODE_LOWPOWER1;
-		else
-			bma250->mode = BMA250E_MODE_LOWPOWER2;
-	} else {
-		bma250->mode = BMA250_MODE_NORMAL;
+		if (BMA250_GET_BITSLICE(mode_ctrl, BMA250E_DEEP_SUSPEND)) {
+			bma250->mode = BMA250E_MODE_DEEP_SUSPEND;
+		} else if(BMA250_GET_BITSLICE(mode_ctrl, BMA250_EN_SUSPEND)) {
+			if (BMA250_GET_BITSLICE(low_noise_ctrl, BMA250E_LOW_POWER_MODE))
+				bma250->mode = BMA250E_MODE_STANDBY;
+			else
+				bma250->mode = BMA250_MODE_SUSPEND;
+		} else if(BMA250_GET_BITSLICE(mode_ctrl, BMA250_EN_LOW_POWER)) {
+			if (BMA250_GET_BITSLICE(low_noise_ctrl, BMA250E_LOW_POWER_MODE))
+				bma250->mode = BMA250_MODE_LOWPOWER1;
+			else
+				bma250->mode = BMA250E_MODE_LOWPOWER2;
+		} else {
+			bma250->mode = BMA250_MODE_NORMAL;
+		}
 	}
 
 	if (mode)
@@ -623,11 +694,12 @@ static int bma250_get_range(struct bma250_data *bma250, enum bma250_range *range
 	if (!bma250)
 		return -1;
 
-	if (bma250_smbus_read_byte(bma250->bma250_client,
-		BMA250_RANGE_SEL_REG, &range_sel) < 0)
-		return -1;
-
-	bma250->range_sel = range_sel;
+	if (!bma250_is_suspended(bma250)) {
+		if (bma250_smbus_read_byte(bma250->bma250_client,
+			BMA250_RANGE_SEL_REG, &range_sel) < 0)
+			return -1;
+		bma250->range_sel = range_sel;
+	}
 
 	if (range)
 		*range = BMA250_GET_BITSLICE(range_sel, BMA250_RANGE_SEL);
@@ -662,10 +734,12 @@ static int bma250_get_bandwidth(struct bma250_data *bma250, unsigned char *bw)
 	if (!bma250)
 		return -1;
 
-	if (bma250_smbus_read_byte(bma250->bma250_client,
-		BMA250_BW__REG, &bw_sel) < 0)
-		return -1;
-	bma250->bw_sel = bw_sel;
+	if (!bma250_is_suspended(bma250)) {
+		if (bma250_smbus_read_byte(bma250->bma250_client,
+			BMA250_BW__REG, &bw_sel) < 0)
+			return -1;
+		bma250->bw_sel = bw_sel;
+	}
 
 	if (bw)
 		*bw = BMA250_GET_BITSLICE(bw_sel, BMA250_BW);
@@ -716,24 +790,27 @@ static void bma250_work_func(struct work_struct *work)
 	static struct bma250acc acc;
 	unsigned long delay = msecs_to_jiffies(atomic_read(&bma250->delay));
 
-	bma250_read_accel_xyz(bma250->bma250_client, &acc);
-	input_report_abs(bma250->input, ABS_X, acc.x);
-	input_report_abs(bma250->input, ABS_Y, acc.y);
-	input_report_abs(bma250->input, ABS_Z, acc.z);
-	dprintk(DEBUG_DATA_INFO, "acc.x %d, acc.y %d, acc.z %d\n", acc.x, acc.y, acc.z);
+	if (!bma250_is_suspended(bma250)) {
+		bma250_read_accel_xyz(bma250->bma250_client, &acc);
+		input_report_abs(bma250->input, ABS_X, acc.x);
+		input_report_abs(bma250->input, ABS_Y, acc.y);
+		input_report_abs(bma250->input, ABS_Z, acc.z);
+		dprintk(DEBUG_DATA_INFO, "acc.x %d, acc.y %d, acc.z %d\n", acc.x, acc.y, acc.z);
 
-	if (flag_suspend
-		&& (((old_value + 20) < acc.z)
-			|| ((old_value - 20) > acc.z)))
-	{
-	     key_press_powerkey_power();
+		if (flag_suspend
+			&& (((old_value + 20) < acc.z)
+				|| ((old_value - 20) > acc.z)))
+		{
+			key_press_powerkey_power();
+		}
+
+		input_sync(bma250->input);
+		mutex_lock(&bma250->value_mutex);
+		bma250->value = acc;
+		mutex_unlock(&bma250->value_mutex);
+		old_value = acc.z;
 	}
 
-	input_sync(bma250->input);
-	mutex_lock(&bma250->value_mutex);
-	bma250->value = acc;
-	mutex_unlock(&bma250->value_mutex);
-	old_value = acc.z;
 	schedule_delayed_work(&bma250->work, delay);
 }
 
