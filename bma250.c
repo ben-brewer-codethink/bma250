@@ -313,6 +313,7 @@ struct bma250_data {
 	atomic_t enable;
 	struct input_dev *input;
 	struct bma250_acc value;
+	struct mutex device_mutex;
 	struct mutex value_mutex;
 	struct mutex enable_mutex;
 	struct delayed_work work;
@@ -433,7 +434,7 @@ static int bma250_get_chip_id(struct bma250_data *bma250, enum bma_chip_id *chip
 	return 0;
 }
 
-static int bma250_deep_suspend(struct bma250_data *bma250, int enable)
+static int bma250_deep_suspend_unsafe(struct bma250_data *bma250, int enable)
 {
 	unsigned char mode_ctrl;
 
@@ -474,7 +475,21 @@ static int bma250_deep_suspend(struct bma250_data *bma250, int enable)
 	return 0;
 }
 
-static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
+static int bma250_deep_suspend(struct bma250_data *bma250, int enable)
+{
+	int ret;
+
+	if (!bma250)
+		return -1;
+
+	mutex_lock(&bma250->device_mutex);
+	ret = bma250_deep_suspend_unsafe(bma250, enable);
+	mutex_unlock(&bma250->device_mutex);
+
+	return ret;
+}
+
+static int bma250_set_mode_unsafe(struct bma250_data *bma250, enum bma250_mode mode)
 {
 	int mode_dirty = 0;
 	unsigned char mode_ctrl;
@@ -499,10 +514,10 @@ static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 	}
 
 	if (mode == BMA250E_MODE_DEEP_SUSPEND)
-		return bma250_deep_suspend(bma250, 1);
+		return bma250_deep_suspend_unsafe(bma250, 1);
 
 	if ((bma250->mode == BMA250E_MODE_DEEP_SUSPEND)
-		&& (bma250_deep_suspend(bma250, 0) < 0))
+		&& (bma250_deep_suspend_unsafe(bma250, 0) < 0))
 		return -1;
 
 	mode_ctrl      = bma250->mode_ctrl;
@@ -541,7 +556,7 @@ static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 	if (low_noise_ctrl != bma250->low_noise_ctrl) {
 		if (bma250->mode != BMA250_MODE_NORMAL)
 		{
-			if (bma250_set_mode(bma250, BMA250_MODE_NORMAL) < 0)
+			if (bma250_set_mode_unsafe(bma250, BMA250_MODE_NORMAL) < 0)
 				return -1;
 			mode_dirty = 1;
 		}
@@ -571,6 +586,20 @@ static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 	return 0;
 }
 
+static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
+{
+	int ret;
+
+	if (!bma250)
+		return -1;
+
+	mutex_lock(&bma250->device_mutex);
+	ret = bma250_set_mode_unsafe(bma250, mode);
+	mutex_unlock(&bma250->device_mutex);
+
+	return ret;
+}
+
 static int bma250_is_suspended(struct bma250_data *bma250)
 {
 	switch (bma250->mode) {
@@ -590,12 +619,16 @@ static int bma250_get_mode(struct bma250_data *bma250, unsigned char *mode)
 	if (!bma250)
 		return -1;
 
+	mutex_lock(&bma250->device_mutex);
+
 	if (!bma250_is_suspended(bma250)) {
 		if ((bma250_smbus_read_byte(bma250->bma250_client,
 			BMA250_MODE_CTRL_REG, &mode_ctrl) < 0)
 			|| (bma250_smbus_read_byte(bma250->bma250_client,
-				BMA250_LOW_NOISE_CTRL_REG, &low_noise_ctrl) < 0))
+				BMA250_LOW_NOISE_CTRL_REG, &low_noise_ctrl) < 0)) {
+			mutex_unlock(&bma250->device_mutex);
 			return -1;
+		}
 
 		bma250->mode_ctrl = mode_ctrl;
 		bma250->low_noise_ctrl = low_noise_ctrl;
@@ -619,6 +652,7 @@ static int bma250_get_mode(struct bma250_data *bma250, unsigned char *mode)
 
 	if (mode)
 		*mode = bma250->mode;
+	mutex_unlock(&bma250->device_mutex);
 	return 0;
 }
 
@@ -642,15 +676,20 @@ static int bma250_set_sleep_dur(struct bma250_data *bma250, unsigned int usecs)
 
 	sleep_dur = bma250_usecs_to_sleep_duration(usecs);
 
+	mutex_lock(&bma250->device_mutex);
+
 	mode_ctrl = bma250->mode_ctrl;
 	mode_ctrl = BMA250_SET_BITSLICE(mode_ctrl, BMA250_SLEEP_DUR, sleep_dur);
 
 	if ((mode_ctrl != bma250->mode_ctrl)
 		&& (bma250_smbus_write_byte(bma250->bma250_client,
-			BMA250_MODE_CTRL_REG, &mode_ctrl) < 0))
+			BMA250_MODE_CTRL_REG, &mode_ctrl) < 0)) {
+		mutex_unlock(&bma250->device_mutex);
 		return -1;
+	}
 
 	bma250->mode_ctrl = mode_ctrl;
+	mutex_unlock(&bma250->device_mutex);
 	return 0;
 }
 
@@ -673,17 +712,22 @@ static int bma250_set_range(struct bma250_data *bma250, enum bma250_range range)
 			break;
 	}
 
+	mutex_lock(&bma250->device_mutex);
+
 	range_sel = bma250->range_sel;
 	range_sel = BMA250_SET_BITSLICE(range_sel,
 		BMA250_RANGE_SEL, range);
 
 	if (range_sel != bma250->range_sel) {
 		if (bma250_smbus_write_byte(bma250->bma250_client,
-			BMA250_RANGE_SEL_REG, &range_sel) < 0)
+			BMA250_RANGE_SEL_REG, &range_sel) < 0) {
+			mutex_unlock(&bma250->device_mutex);
 			return -1;
+		}
 		bma250->range_sel = range_sel;
 	}
 
+	mutex_unlock(&bma250->device_mutex);
 	return 0;
 }
 
@@ -694,12 +738,18 @@ static int bma250_get_range(struct bma250_data *bma250, enum bma250_range *range
 	if (!bma250)
 		return -1;
 
+	mutex_lock(&bma250->device_mutex);
+
 	if (!bma250_is_suspended(bma250)) {
 		if (bma250_smbus_read_byte(bma250->bma250_client,
-			BMA250_RANGE_SEL_REG, &range_sel) < 0)
+			BMA250_RANGE_SEL_REG, &range_sel) < 0) {
+			mutex_unlock(&bma250->device_mutex);
 			return -1;
+		}
 		bma250->range_sel = range_sel;
 	}
+
+	mutex_unlock(&bma250->device_mutex);
 
 	if (range)
 		*range = BMA250_GET_BITSLICE(range_sel, BMA250_RANGE_SEL);
@@ -714,16 +764,21 @@ static int bma250_set_bandwidth(struct bma250_data *bma250, enum bma250_bw bw)
 	if (!bma250 || (bw >= 32))
 		return -1;
 
+	mutex_lock(&bma250->device_mutex);
+
 	bw_sel = bma250->bw_sel;
 	bw_sel = BMA250_SET_BITSLICE(bw_sel, BMA250_BW, bw);
 
 	if (bw_sel != bma250->bw_sel) {
 		if (bma250_smbus_write_byte(bma250->bma250_client,
-			BMA250_BW__REG, &bw_sel) < 0)
+			BMA250_BW__REG, &bw_sel) < 0) {
+			mutex_unlock(&bma250->device_mutex);
 			return -1;
+		}
 		bma250->bw_sel = bw_sel;
 	}
 
+	mutex_unlock(&bma250->device_mutex);
 	return 0;
 }
 
@@ -734,12 +789,18 @@ static int bma250_get_bandwidth(struct bma250_data *bma250, unsigned char *bw)
 	if (!bma250)
 		return -1;
 
+	mutex_lock(&bma250->device_mutex);
+
 	if (!bma250_is_suspended(bma250)) {
 		if (bma250_smbus_read_byte(bma250->bma250_client,
-			BMA250_BW__REG, &bw_sel) < 0)
+			BMA250_BW__REG, &bw_sel) < 0) {
+			mutex_unlock(&bma250->device_mutex);
 			return -1;
+		}
 		bma250->bw_sel = bw_sel;
 	}
+
+	mutex_unlock(&bma250->device_mutex);
 
 	if (bw)
 		*bw = BMA250_GET_BITSLICE(bw_sel, BMA250_BW);
@@ -753,9 +814,13 @@ static int bma250_read_accel_xyz(struct bma250_data *bma250, struct bma250_acc *
 	if (!bma250)
 		return -1;
 
+	mutex_lock(&bma250->device_mutex);
+
 	if (i2c_smbus_read_i2c_block_data(bma250->bma250_client,
-		BMA250_ACC_X_LSB__REG, 6, data) < 0)
+		BMA250_ACC_X_LSB__REG, 6, data) < 0) {
+		mutex_unlock(&bma250->device_mutex);
 		return -1;
+	}
 
 	acc->x = BMA250_GET_BITSLICE(data[0], BMA250_ACC_X_LSB)
 		| (BMA250_GET_BITSLICE(data[1], BMA250_ACC_X_MSB) << BMA250_ACC_X_LSB__LEN);
@@ -766,6 +831,7 @@ static int bma250_read_accel_xyz(struct bma250_data *bma250, struct bma250_acc *
 	acc->z = BMA250_GET_BITSLICE(data[4], BMA250_ACC_Z_LSB)
 		| (BMA250_GET_BITSLICE(data[5], BMA250_ACC_Z_MSB) << BMA250_ACC_Z_LSB__LEN);
 
+	mutex_unlock(&bma250->device_mutex);
 	return 0;
 }
 
@@ -1201,6 +1267,7 @@ static int bma250_probe(struct i2c_client *client,
 	i2c_set_clientdata(client, data);
 	data->bma250_client = client;
 
+	mutex_init(&data->device_mutex);
 	mutex_init(&data->value_mutex);
 	mutex_init(&data->enable_mutex);
 
