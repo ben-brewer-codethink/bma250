@@ -193,6 +193,10 @@ enum bma_chip_id
 #define BMA250_EN_SUSPEND__LEN                  1
 #define BMA250_EN_SUSPEND__REG                  BMA250_MODE_CTRL_REG
 
+#define BMA250_LATCH_INT__POS                   0
+#define BMA250_LATCH_INT__LEN                   4
+#define BMA250_LATCH_INT__REG                   BMA250_INT_CTRL_REG
+
 
 #define BMA250_BITMASK(bitname)\
 	(((1U << bitname##__LEN) - 1) << bitname##__POS)
@@ -260,6 +264,41 @@ static unsigned int bma250_sleep_dur_value[] = {
 	 4000,   6000,  10000,   25000,
 	50000, 100000, 500000, 1000000,
 };
+
+
+/* interrupt latching */
+
+enum bma250_latch_int {
+	BMA250_LATCH_INT_NON_LATCHED      =  0,
+	BMA250_LATCH_INT_TEMPORARY_250MS  =  1,
+	BMA250_LATCH_INT_TEMPORARY_500MS  =  2,
+	BMA250_LATCH_INT_TEMPORARY_1S     =  3,
+	BMA250_LATCH_INT_TEMPORARY_2S     =  4,
+	BMA250_LATCH_INT_TEMPORARY_4S     =  5,
+	BMA250_LATCH_INT_TEMPORARY_8S     =  6,
+	BMA250_LATCH_INT_LATCHED          =  7,
+	BMA250_LATCH_INT_NON_LATCHED_1    =  8,
+	BMA250_LATCH_INT_TEMPORARY_250US  =  9,
+	BMA250_LATCH_INT_TEMPORARY_500US  = 10,
+	BMA250_LATCH_INT_TEMPORARY_1MS    = 11,
+	BMA250_LATCH_INT_TEMPORARY_12_5MS = 12,
+	BMA250_LATCH_INT_TEMPORARY_25MS   = 13,
+	BMA250_LATCH_INT_TEMPORARY_50MS   = 14,
+	BMA250_LATCH_INT_LATCHED_1        = 15,
+
+	BMA250_LATCH_INT_COUNT = 16
+};
+
+static unsigned int bma250_latch_int_time[] = {
+	0, 250000, 500000, 1000000, 2000000, 4000000, 8000000, 0,
+	0,    250,    500,    1000,   12500,   25000,   50000, 0,
+};
+
+static const char* bma250_latch_int_name[] = {
+	"non-latched", NULL, NULL, NULL, NULL, NULL, NULL, "latched",
+	"non-latched", NULL, NULL, NULL, NULL, NULL, NULL, "latched",
+};
+
 
 /* mode settings */
 
@@ -724,6 +763,30 @@ static int bma250_set_sleep_dur(struct bma250_data *bma250, unsigned int usecs)
 	return 0;
 }
 
+static int bma250_set_latch_int(struct bma250_data *bma250, enum bma250_latch_int latch_int)
+{
+	unsigned char int_ctrl;
+
+	if (!bma250 || (latch_int >= BMA250_LATCH_INT_COUNT))
+		return -1;
+
+	mutex_lock(&bma250->device_mutex);
+
+	int_ctrl = bma250->state[BMA250_INT_CTRL_REG];
+	int_ctrl = BMA250_SET_BITSLICE(int_ctrl, BMA250_LATCH_INT, latch_int);
+
+	if ((int_ctrl != bma250->state[BMA250_INT_CTRL_REG])
+		&& (bma250_smbus_write_byte(bma250->bma250_client,
+			BMA250_INT_CTRL_REG, &int_ctrl) < 0)) {
+		mutex_unlock(&bma250->device_mutex);
+		return -1;
+	}
+
+	bma250->state[BMA250_INT_CTRL_REG] = int_ctrl;
+	mutex_unlock(&bma250->device_mutex);
+	return 0;
+}
+
 static int bma250_set_range(struct bma250_data *bma250, enum bma250_range range)
 {
 	unsigned char range_sel;
@@ -1042,6 +1105,94 @@ static ssize_t bma250_sleep_dur_store(struct device *dev,
 	return count;
 }
 
+static enum bma250_latch_int bma250_usecs_to_latch_int(unsigned long usecs)
+{
+	unsigned long times[] = {
+		8000000,
+		4000000,
+		2000000,
+		1000000,
+		 500000,
+		 250000,
+		  50000,
+		  25000,
+		  12500,
+		   1000,
+		    500,
+		    250,
+		      0,
+	};
+
+	enum bma250_latch_int values[] = {
+		BMA250_LATCH_INT_TEMPORARY_8S,
+		BMA250_LATCH_INT_TEMPORARY_4S,
+		BMA250_LATCH_INT_TEMPORARY_2S,
+		BMA250_LATCH_INT_TEMPORARY_1S,
+		BMA250_LATCH_INT_TEMPORARY_500MS,
+		BMA250_LATCH_INT_TEMPORARY_250MS,
+		BMA250_LATCH_INT_TEMPORARY_50MS,
+		BMA250_LATCH_INT_TEMPORARY_25MS,
+		BMA250_LATCH_INT_TEMPORARY_12_5MS,
+		BMA250_LATCH_INT_TEMPORARY_1MS,
+		BMA250_LATCH_INT_TEMPORARY_500US,
+		BMA250_LATCH_INT_TEMPORARY_250US,
+	};
+
+	unsigned char i;
+
+	if (usecs == 0)
+		return BMA250_LATCH_INT_NON_LATCHED;
+
+	for (i = 0; times[i] != 0; i++) {
+		if (usecs < times[i])
+			return values[i];
+	}
+
+	return BMA250_LATCH_INT_COUNT;
+}
+
+static ssize_t bma250_latch_int_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	unsigned char latch_int;
+
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	latch_int = BMA250_GET_STATE_BITSLICE(bma250->state, BMA250_LATCH_INT);
+
+	if (bma250_latch_int_name[latch_int])
+		return sprintf(buf, "%s\n", bma250_latch_int_name[latch_int]);
+	return sprintf(buf, "%u\n", bma250_latch_int_time[latch_int]);
+}
+
+static ssize_t bma250_latch_int_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	unsigned long latch_usecs;
+	enum bma250_latch_int latch_int;
+	int error;
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	if (strcmp(buf, "non-latched") == 0) {
+		latch_int = BMA250_LATCH_INT_NON_LATCHED;
+	} else if (strcmp(buf, "latched") == 0) {
+		latch_int = BMA250_LATCH_INT_LATCHED;
+	} else {
+		error = strict_strtoul(buf, 10, &latch_usecs);
+		if (error)
+			return error;
+		latch_int = bma250_usecs_to_latch_int(latch_usecs);
+	}
+
+	if (bma250_set_latch_int(bma250, latch_int) < 0)
+		return -EINVAL;
+
+	return count;
+}
+
 
 static ssize_t bma250_value_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -1162,6 +1313,8 @@ static DEVICE_ATTR(mode, S_IRUGO|S_IWUSR|S_IWGRP,
 		bma250_mode_show, bma250_mode_store);
 static DEVICE_ATTR(sleep_dur, S_IRUGO|S_IWUSR|S_IWGRP,
 		bma250_sleep_dur_show, bma250_sleep_dur_store);
+static DEVICE_ATTR(latch_int, S_IRUGO|S_IWUSR|S_IWGRP,
+		bma250_latch_int_show, bma250_latch_int_store);
 static DEVICE_ATTR(value, S_IRUGO,
 		bma250_value_show, NULL);
 static DEVICE_ATTR(delay, S_IRUGO|S_IWUSR|S_IWGRP,
@@ -1177,6 +1330,7 @@ static struct attribute *bma250_attributes[] = {
 	&dev_attr_update_time.attr,
 	&dev_attr_mode.attr,
 	&dev_attr_sleep_dur.attr,
+	&dev_attr_latch_int.attr,
 	&dev_attr_value.attr,
 	&dev_attr_delay.attr,
 	&dev_attr_enable.attr,
