@@ -1507,6 +1507,24 @@ static ssize_t bma250_enable_store(struct device *dev,
 	return count;
 }
 
+static ssize_t bma250_refresh_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	int ret;
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	if (bma250_is_suspended(bma250))
+		return -EINVAL;
+
+	mutex_lock(&bma250->device_mutex);
+	ret = bma250_read_state(bma250);
+	mutex_unlock(&bma250->device_mutex);
+
+	return (ret < 0 ? -EINVAL : count);
+}
+
 static DEVICE_ATTR(chip_id, S_IRUGO,
 		bma250_chip_id_show, NULL);
 static DEVICE_ATTR(range, S_IRUGO|S_IWUSR|S_IWGRP,
@@ -1543,6 +1561,8 @@ static DEVICE_ATTR(delay, S_IRUGO|S_IWUSR|S_IWGRP,
 		bma250_delay_show, bma250_delay_store);
 static DEVICE_ATTR(enable, S_IRUGO|S_IWUSR|S_IWGRP,
 		bma250_enable_show, bma250_enable_store);
+static DEVICE_ATTR(refresh, S_IWUSR|S_IWGRP,
+		NULL, bma250_refresh_store);
 
 static struct attribute *bma250_attributes[] = {
 	&dev_attr_chip_id.attr,
@@ -1563,6 +1583,7 @@ static struct attribute *bma250_attributes[] = {
 	&dev_attr_value.attr,
 	&dev_attr_delay.attr,
 	&dev_attr_enable.attr,
+	&dev_attr_refresh.attr,
 	NULL
 };
 
