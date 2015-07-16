@@ -165,6 +165,10 @@ enum bma_chip_id
 #define BMA250_ACC_Z_MSB__LEN                   8
 #define BMA250_ACC_Z_MSB__REG                   BMA250_Z_AXIS_MSB_REG
 
+#define BMA250_SLOPE_INT__POS                   2
+#define BMA250_SLOPE_INT__LEN                   1
+#define BMA250_SLOPE_INT__REG                   BMA250_STATUS1_REG
+
 #define BMA250_RANGE_SEL__POS                   0
 #define BMA250_RANGE_SEL__LEN                   4
 #define BMA250_RANGE_SEL__REG                   BMA250_RANGE_SEL_REG
@@ -193,9 +197,33 @@ enum bma_chip_id
 #define BMA250_EN_SUSPEND__LEN                  1
 #define BMA250_EN_SUSPEND__REG                  BMA250_MODE_CTRL_REG
 
+#define BMA250_SLOPE_EN_X__POS                  0
+#define BMA250_SLOPE_EN_X__LEN                  1
+#define BMA250_SLOPE_EN_X__REG                  BMA250_INT_ENABLE1_REG
+
+#define BMA250_SLOPE_EN_Y__POS                  1
+#define BMA250_SLOPE_EN_Y__LEN                  1
+#define BMA250_SLOPE_EN_Y__REG                  BMA250_INT_ENABLE1_REG
+
+#define BMA250_SLOPE_EN_Z__POS                  2
+#define BMA250_SLOPE_EN_Z__LEN                  1
+#define BMA250_SLOPE_EN_Z__REG                  BMA250_INT_ENABLE1_REG
+
 #define BMA250_LATCH_INT__POS                   0
 #define BMA250_LATCH_INT__LEN                   4
 #define BMA250_LATCH_INT__REG                   BMA250_INT_CTRL_REG
+
+#define BMA250_INT_SRC_SLOPE__POS               0
+#define BMA250_INT_SRC_SLOPE__LEN               2
+#define BMA250_INT_SRC_SLOPE__REG               BMA250_INT_SRC_REG
+
+#define BMA250_SLOPE_DUR__POS                   0
+#define BMA250_SLOPE_DUR__LEN                   2
+#define BMA250_SLOPE_DUR__REG                   BMA250_SLOPE_DURN_REG
+
+#define BMA250_SLOPE_TH__POS                    0
+#define BMA250_SLOPE_TH__LEN                    8
+#define BMA250_SLOPE_TH__REG                    BMA250_SLOPE_THRES_REG
 
 
 #define BMA250_BITMASK(bitname)\
@@ -1136,6 +1164,214 @@ static ssize_t bma250_latch_int_store(struct device *dev,
 	return count;
 }
 
+static ssize_t bma250_slope_th_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	unsigned int threshold;
+
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	threshold = BMA250_GET_STATE_BITSLICE(bma250->state, BMA250_SLOPE_TH);
+
+	return sprintf(buf, "%u\n", threshold);
+}
+
+static ssize_t bma250_slope_th_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	unsigned long threshold;
+	int error;
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	error = strict_strtoul(buf, 10, &threshold);
+	if (error)
+		return error;
+
+	if (BMA250_SET_REG(bma250, BMA250_SLOPE_TH, threshold) < 0)
+		return -EINVAL;
+
+	return count;
+}
+
+static ssize_t bma250_slope_dur_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	unsigned int duration;
+
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	duration = BMA250_GET_STATE_BITSLICE(bma250->state, BMA250_SLOPE_DUR) + 1;
+
+	return sprintf(buf, "%u\n", duration);
+}
+
+static ssize_t bma250_slope_dur_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	unsigned long duration;
+	int error;
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	error = strict_strtoul(buf, 10, &duration);
+	if (error)
+		return error;
+
+	if (duration <= 0)
+		return -EINVAL;
+
+	if (BMA250_SET_REG(bma250, BMA250_SLOPE_DUR, (duration - 1)) < 0)
+		return -EINVAL;
+
+	return count;
+}
+
+static ssize_t bma250_int_src_slope_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	unsigned int src;
+
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	src = BMA250_GET_STATE_BITSLICE(bma250->state, BMA250_INT_SRC_SLOPE);
+
+	return sprintf(buf, "%u\n", src);
+}
+
+static ssize_t bma250_int_src_slope_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	unsigned long src;
+	int error;
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	error = strict_strtoul(buf, 10, &src);
+	if (error)
+		return error;
+
+	if (BMA250_SET_REG(bma250, BMA250_INT_SRC_SLOPE, src) < 0)
+		return -EINVAL;
+
+	return count;
+}
+
+static ssize_t bma250_slope_en_x_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	unsigned int enable;
+
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	enable = BMA250_GET_STATE_BITSLICE(bma250->state, BMA250_SLOPE_EN_X);
+
+	return sprintf(buf, "%u\n", enable);
+}
+
+static ssize_t bma250_slope_en_x_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	unsigned long enable;
+	int error;
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	error = strict_strtoul(buf, 10, &enable);
+	if (error)
+		return error;
+
+	if (BMA250_SET_REG(bma250, BMA250_SLOPE_EN_X, enable) < 0)
+		return -EINVAL;
+
+	return count;
+}
+
+static ssize_t bma250_slope_en_y_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	unsigned int enable;
+
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	enable = BMA250_GET_STATE_BITSLICE(bma250->state, BMA250_SLOPE_EN_Y);
+
+	return sprintf(buf, "%u\n", enable);
+}
+
+static ssize_t bma250_slope_en_y_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	unsigned long enable;
+	int error;
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	error = strict_strtoul(buf, 10, &enable);
+	if (error)
+		return error;
+
+	if (BMA250_SET_REG(bma250, BMA250_SLOPE_EN_Y, enable) < 0)
+		return -EINVAL;
+
+	return count;
+}
+
+static ssize_t bma250_slope_en_z_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	unsigned int enable;
+
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	enable = BMA250_GET_STATE_BITSLICE(bma250->state, BMA250_SLOPE_EN_Z);
+
+	return sprintf(buf, "%u\n", enable);
+}
+
+static ssize_t bma250_slope_en_z_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	unsigned long enable;
+	int error;
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	error = strict_strtoul(buf, 10, &enable);
+	if (error)
+		return error;
+
+	if (BMA250_SET_REG(bma250, BMA250_SLOPE_EN_Z, enable) < 0)
+		return -EINVAL;
+
+	return count;
+}
+
+static ssize_t bma250_slope_int_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	unsigned int enable;
+
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	enable = BMA250_GET_STATE_BITSLICE(bma250->state, BMA250_SLOPE_INT);
+
+	return sprintf(buf, "%u\n", enable);
+}
+
 
 static ssize_t bma250_value_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -1258,6 +1494,20 @@ static DEVICE_ATTR(sleep_dur, S_IRUGO|S_IWUSR|S_IWGRP,
 		bma250_sleep_dur_show, bma250_sleep_dur_store);
 static DEVICE_ATTR(latch_int, S_IRUGO|S_IWUSR|S_IWGRP,
 		bma250_latch_int_show, bma250_latch_int_store);
+static DEVICE_ATTR(slope_th, S_IRUGO|S_IWUSR|S_IWGRP,
+		bma250_slope_th_show, bma250_slope_th_store);
+static DEVICE_ATTR(slope_dur, S_IRUGO|S_IWUSR|S_IWGRP,
+		bma250_slope_dur_show, bma250_slope_dur_store);
+static DEVICE_ATTR(int_src_slope, S_IRUGO|S_IWUSR|S_IWGRP,
+		bma250_int_src_slope_show, bma250_int_src_slope_store);
+static DEVICE_ATTR(slope_en_x, S_IRUGO|S_IWUSR|S_IWGRP,
+		bma250_slope_en_x_show, bma250_slope_en_x_store);
+static DEVICE_ATTR(slope_en_y, S_IRUGO|S_IWUSR|S_IWGRP,
+		bma250_slope_en_y_show, bma250_slope_en_y_store);
+static DEVICE_ATTR(slope_en_z, S_IRUGO|S_IWUSR|S_IWGRP,
+		bma250_slope_en_z_show, bma250_slope_en_z_store);
+static DEVICE_ATTR(slope_int, S_IRUGO,
+		bma250_slope_int_show, NULL);
 static DEVICE_ATTR(value, S_IRUGO,
 		bma250_value_show, NULL);
 static DEVICE_ATTR(delay, S_IRUGO|S_IWUSR|S_IWGRP,
@@ -1274,6 +1524,13 @@ static struct attribute *bma250_attributes[] = {
 	&dev_attr_mode.attr,
 	&dev_attr_sleep_dur.attr,
 	&dev_attr_latch_int.attr,
+	&dev_attr_slope_th.attr,
+	&dev_attr_slope_dur.attr,
+	&dev_attr_int_src_slope.attr,
+	&dev_attr_slope_en_x.attr,
+	&dev_attr_slope_en_y.attr,
+	&dev_attr_slope_en_z.attr,
+	&dev_attr_slope_int.attr,
 	&dev_attr_value.attr,
 	&dev_attr_delay.attr,
 	&dev_attr_enable.attr,
