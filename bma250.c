@@ -755,6 +755,36 @@ static int bma250_set_mode(struct bma250_data *bma250, enum bma250_mode mode)
 }
 
 
+static int bma250_get_reg(struct bma250_data *bma250,
+	unsigned int reg, unsigned int pos, unsigned int len, unsigned char* val)
+{
+	unsigned char mask;
+	unsigned char regval;
+
+	if (!bma250 || !bma250->bma250_client)
+		return -1;
+
+	mutex_lock(&bma250->device_mutex);
+
+	if (bma250_smbus_read_byte(bma250->bma250_client, reg, &regval) < 0) {
+		mutex_unlock(&bma250->device_mutex);
+		return -1;
+	}
+	bma250->state[reg] = regval;
+
+	mutex_unlock(&bma250->device_mutex);
+
+	if (val) {
+		mask = (1U << len) - 1;
+		*val = (regval >> pos) & mask;
+	}
+
+	return 0;
+}
+
+#define BMA250_GET_REG(device, bitname, val)\
+	bma250_get_reg(device, bitname##__REG, bitname##__POS, bitname##__LEN, val)
+
 static int bma250_set_reg(struct bma250_data *bma250,
 	unsigned int reg, unsigned int pos, unsigned int len, unsigned char val)
 {
@@ -1362,14 +1392,13 @@ static ssize_t bma250_slope_en_z_store(struct device *dev,
 static ssize_t bma250_slope_int_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	unsigned int enable;
+	unsigned char enable = 0;
 
 	struct i2c_client *client = to_i2c_client(dev);
 	struct bma250_data *bma250 = i2c_get_clientdata(client);
 
-	enable = BMA250_GET_STATE_BITSLICE(bma250->state, BMA250_SLOPE_INT);
-
-	return sprintf(buf, "%u\n", enable);
+	BMA250_GET_REG(bma250, BMA250_SLOPE_INT, &enable);
+	return sprintf(buf, "%u\n", (unsigned int) enable);
 }
 
 
