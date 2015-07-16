@@ -143,81 +143,71 @@ enum bma_chip_id
 
 #define BMA250_ACC_X_LSB__POS                   6
 #define BMA250_ACC_X_LSB__LEN                   2
-#define BMA250_ACC_X_LSB__MSK                   0xC0
 #define BMA250_ACC_X_LSB__REG                   BMA250_X_AXIS_LSB_REG
 
 #define BMA250_ACC_X_MSB__POS                   0
 #define BMA250_ACC_X_MSB__LEN                   8
-#define BMA250_ACC_X_MSB__MSK                   0xFF
 #define BMA250_ACC_X_MSB__REG                   BMA250_X_AXIS_MSB_REG
 
 #define BMA250_ACC_Y_LSB__POS                   6
 #define BMA250_ACC_Y_LSB__LEN                   2
-#define BMA250_ACC_Y_LSB__MSK                   0xC0
 #define BMA250_ACC_Y_LSB__REG                   BMA250_Y_AXIS_LSB_REG
 
 #define BMA250_ACC_Y_MSB__POS                   0
 #define BMA250_ACC_Y_MSB__LEN                   8
-#define BMA250_ACC_Y_MSB__MSK                   0xFF
 #define BMA250_ACC_Y_MSB__REG                   BMA250_Y_AXIS_MSB_REG
 
 #define BMA250_ACC_Z_LSB__POS                   6
 #define BMA250_ACC_Z_LSB__LEN                   2
-#define BMA250_ACC_Z_LSB__MSK                   0xC0
 #define BMA250_ACC_Z_LSB__REG                   BMA250_Z_AXIS_LSB_REG
 
 #define BMA250_ACC_Z_MSB__POS                   0
 #define BMA250_ACC_Z_MSB__LEN                   8
-#define BMA250_ACC_Z_MSB__MSK                   0xFF
 #define BMA250_ACC_Z_MSB__REG                   BMA250_Z_AXIS_MSB_REG
 
 #define BMA250_RANGE_SEL__POS                   0
 #define BMA250_RANGE_SEL__LEN                   4
-#define BMA250_RANGE_SEL__MSK                   0x0F
 #define BMA250_RANGE_SEL__REG                   BMA250_RANGE_SEL_REG
 
 #define BMA250_BW__POS                          0
 #define BMA250_BW__LEN                          5
-#define BMA250_BW__MSK                          0x1F
 #define BMA250_BW__REG                          BMA250_BW_SEL_REG
 
 #define BMA250E_LOW_POWER_MODE__POS             6
 #define BMA250E_LOW_POWER_MODE__LEN             1
-#define BMA250E_LOW_POWER_MODE__MSK             0x40
 #define BMA250E_LOW_POWER_MODE__REG             BMA250_LOW_NOISE_CTRL_REG
 
 #define BMA250_SLEEP_DUR__POS                   1
 #define BMA250_SLEEP_DUR__LEN                   4
-#define BMA250_SLEEP_DUR__MSK                   0x1E
 #define BMA250_SLEEP_DUR__REG                   BMA250_MODE_CTRL_REG
 
 #define BMA250E_DEEP_SUSPEND__POS               5
 #define BMA250E_DEEP_SUSPEND__LEN               1
-#define BMA250E_DEEP_SUSPEND__MSK               0x20
 #define BMA250E_DEEP_SUSPEND__REG               BMA250_MODE_CTRL_REG
 
 #define BMA250_EN_LOW_POWER__POS                6
 #define BMA250_EN_LOW_POWER__LEN                1
-#define BMA250_EN_LOW_POWER__MSK                0x40
 #define BMA250_EN_LOW_POWER__REG                BMA250_MODE_CTRL_REG
 
 #define BMA250_EN_SUSPEND__POS                  7
 #define BMA250_EN_SUSPEND__LEN                  1
-#define BMA250_EN_SUSPEND__MSK                  0x80
 #define BMA250_EN_SUSPEND__REG                  BMA250_MODE_CTRL_REG
 
 
+#define BMA250_BITMASK(bitname)\
+	(((1U << bitname##__LEN) - 1) << bitname##__POS)
+
 #define BMA250_GET_BITSLICE(regvar, bitname)\
-			((regvar & bitname##__MSK) >> bitname##__POS)
+	((regvar & BMA250_BITMASK(bitname)) >> bitname##__POS)
 
 #define BMA250_SET_BITSLICE(regvar, bitname, val)\
-	((regvar & ~bitname##__MSK) | ((val<<bitname##__POS)&bitname##__MSK))
+	((regvar & ~BMA250_BITMASK(bitname)) | ((val << bitname##__POS) & BMA250_BITMASK(bitname)))
 
 #define BMA250_GET_STATE_BITSLICE(state, bitname)\
-			BMA250_GET_BITSLICE(state[bitname##__REG], bitname)
+	BMA250_GET_BITSLICE(state[bitname##__REG], bitname)
 
 #define BMA250_SET_STATE_BITSLICE(state, bitname, val)\
-			BMA250_SET_BITSLICE(state[bitname##__REG], bitname, val)
+	BMA250_SET_BITSLICE(state[bitname##__REG], bitname, val)
 
 
 /* range and bandwidth */
