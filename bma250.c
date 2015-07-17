@@ -75,6 +75,7 @@ enum bma_chip_id
 #define BMA250_RANGE_SET                        BMA250_RANGE_2G
 #define BMA250_BW_SET                           BMA250_BW_125HZ
 #define BMA250_SUSPEND_DELAY_SET                0
+#define BMA250_WAKE_THRESHOLD_SET               20
 
 
 /*
@@ -370,6 +371,7 @@ struct bma250_data {
 
 	atomic_t delay;
 	atomic_t suspend_delay;
+	atomic_t wake_threshold;
 	atomic_t enable;
 	struct input_dev *input;
 	struct bma250_acc value;
@@ -887,6 +889,7 @@ static void bma250_work_func(struct work_struct *work)
 	struct bma250_data *bma250 = container_of((struct delayed_work *)work,
 			struct bma250_data, work);
 	static struct bma250_acc acc;
+	unsigned int threshold;
 	unsigned long delay = msecs_to_jiffies(atomic_read(&bma250->delay));
 
 	if (!bma250_is_suspended(bma250)) {
@@ -896,9 +899,11 @@ static void bma250_work_func(struct work_struct *work)
 		input_report_abs(bma250->input, ABS_Z, acc.z);
 		dprintk(DEBUG_DATA_INFO, "acc.x %d, acc.y %d, acc.z %d\n", acc.x, acc.y, acc.z);
 
+		threshold = atomic_read(&bma250->wake_threshold);
+
 		if (flag_suspend
-			&& (((old_value + 20) < acc.z)
-				|| ((old_value - 20) > acc.z)))
+			&& (((old_value + threshold) < acc.z)
+				|| ((old_value - threshold) > acc.z)))
 		{
 			key_press_powerkey_power();
 		}
@@ -1490,6 +1495,34 @@ static ssize_t bma250_suspend_delay_store(struct device *dev,
 	return count;
 }
 
+static ssize_t bma250_wake_threshold_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	return sprintf(buf, "%d\n", atomic_read(&bma250->wake_threshold));
+}
+
+static ssize_t bma250_wake_threshold_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	unsigned long threshold;
+	int error;
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	error = strict_strtoul(buf, 10, &threshold);
+
+	if (error)
+		return error;
+
+	atomic_set(&bma250->wake_threshold, (unsigned int) threshold);
+
+	return count;
+}
+
 
 static ssize_t bma250_enable_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -1600,6 +1633,8 @@ static DEVICE_ATTR(delay, S_IRUGO|S_IWUSR|S_IWGRP,
 		bma250_delay_show, bma250_delay_store);
 static DEVICE_ATTR(suspend_delay, S_IRUGO|S_IWUSR|S_IWGRP,
 		bma250_suspend_delay_show, bma250_suspend_delay_store);
+static DEVICE_ATTR(wake_threshold, S_IRUGO|S_IWUSR|S_IWGRP,
+		bma250_wake_threshold_show, bma250_wake_threshold_store);
 static DEVICE_ATTR(enable, S_IRUGO|S_IWUSR|S_IWGRP,
 		bma250_enable_show, bma250_enable_store);
 static DEVICE_ATTR(refresh, S_IWUSR|S_IWGRP,
@@ -1624,6 +1659,7 @@ static struct attribute *bma250_attributes[] = {
 	&dev_attr_value.attr,
 	&dev_attr_delay.attr,
 	&dev_attr_suspend_delay.attr,
+	&dev_attr_wake_threshold.attr,
 	&dev_attr_enable.attr,
 	&dev_attr_refresh.attr,
 	NULL
@@ -1702,6 +1738,8 @@ static int bma250_probe(struct i2c_client *client,
 	bma250_set_sleep_dur(data, BMA250_SLEEP_DUR_SET);
 	BMA250_SET_REG(data, BMA250_BW, BMA250_BW_SET);
 	bma250_set_range(data, BMA250_RANGE_SET);
+
+	atomic_set(&data->wake_threshold, BMA250_WAKE_THRESHOLD_SET);
 
 	INIT_DELAYED_WORK(&data->work, bma250_work_func);
 	dprintk(DEBUG_INIT, "bma: INIT_DELAYED_WORK\n");
